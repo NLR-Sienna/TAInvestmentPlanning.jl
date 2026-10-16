@@ -30,9 +30,7 @@ TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 TimeSeries = "9e3dc215-6440-5c97-bce1-76c03772f85e"
 
 [sources]
-# Local branch with the single-region balance slack and base thermal cost changes
-PowerSystemsInvestments = {path = "../PowerSystemsInvestments.jl"}
-PowerSystemsInvestmentsPortfolios = {url = "https://github.com/Sienna-Platform/PowerSystemsInvestmentsPortfolios.jl.git", rev = "cb/inv_compat"}
+PowerSystemsInvestmentsPortfolios = {rev = "cb/inv_compat", url = "https://github.com/Sienna-Platform/PowerSystemsInvestmentsPortfolios.jl.git"}
 
 [compat]
 ArgParse = "1.2"
@@ -53,7 +51,7 @@ PowerAnalytics = "1.2"
 PowerGraphics = "0.21"
 PowerSimulations = "0.33"
 PowerSystems = "5.9"
-PowerSystemsInvestments = "0.1"
+PowerSystemsInvestments = "0.1.0"
 PowerSystemsInvestmentsPortfolios = "0.1"
 Printf = "1"
 Statistics = "1"

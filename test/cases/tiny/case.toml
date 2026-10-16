@@ -38,7 +38,8 @@ name = "Tiny_Demand"
 bus = "Main"
 
 [scenarios]
-default_arrivals = "scenarios/default_arrivals.json"
+arrivals = "scenarios/arrivals.json"
+default_scenario = "growth"
 default_procurement_timelines = "scenarios/default_procurement_timelines.json"
 
 [pcm]

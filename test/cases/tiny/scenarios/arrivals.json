@@ -1,5 +1,6 @@
 {
   "growth": [
     {"year": 2026, "mw": 4.0, "conforming": false, "bus": "East"}
-  ]
+  ],
+  "flat": []
 }

@@ -63,7 +63,8 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
 
     @testset "Scenario inputs" begin
         scenarios = parse_arrivals_scenarios("")
-        @test collect(keys(scenarios)) == ["growth"]
+        @test sort(collect(keys(scenarios))) == ["flat", "growth"]
+        @test settings().default_scenario == "growth"
         arrival = only(default_arrivals())
         @test (arrival.year, arrival.mw, arrival.conforming, arrival.bus) == (2026, 4.0, false, "East")
         @test isnothing(arrival.custom_profile_path)
@@ -75,6 +76,7 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
         @test only(keys(parse_arrivals_scenarios("""[{"year": 2027, "mw": 1.0, "bus": "Main"}]"""))) == "default"
         @test_throws ErrorException parse_arrivals_scenarios("""{"a": [{"year": 2027, "mw": 1.0}]}""")
         @test_throws ErrorException parse_arrivals_scenarios("{}")
+        @test_throws "file not found" parse_arrivals_scenarios("no_such_arrivals.json")
         err = try
             get_arrivals_for_scenario(multi, "missing")
         catch e
@@ -154,9 +156,10 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
         @test IP._diesel_price(parse_cmdline(["cem", "--diesel-price=6.5"])) == 6.5
         @test args["enable-nodal-slack"] && !parse_cmdline(["--disable-nodal-slack"])["enable-nodal-slack"]
 
-        # The only scenario in the default arrivals is selected automatically
+        # Without --scenario: the case default scenario, else the only scenario in the input
         name, _, arrivals = IP._select_arrivals(args)
         @test name == "growth" && length(arrivals) == 1
+        @test first(IP._select_arrivals(parse_cmdline(["--arrivals={\"only\": []}"]))) == "only"
         two = parse_cmdline(["--arrivals={\"a\": [], \"b\": []}"])
         @test_throws ErrorException IP._select_arrivals(two)
         @test first(IP._select_arrivals(parse_cmdline(["--arrivals={\"a\": [], \"b\": []}", "--scenario=b"]))) == "b"

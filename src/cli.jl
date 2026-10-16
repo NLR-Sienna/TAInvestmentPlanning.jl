@@ -25,12 +25,12 @@ function _arg_settings()
             arg_type = String
 
         "--arrivals"
-            help = "JSON file or string with load arrival scenarios: {\"scenario_name\": [{\"year\": 2027, \"mw\": 1.0, \"conforming\": true, \"bus\": \"Bus_Name\"}, ...], ...} (default: the case's default arrivals)"
+            help = "JSON file or string with load arrival scenarios: {\"scenario_name\": [{\"year\": 2027, \"mw\": 1.0, \"conforming\": true, \"bus\": \"Bus_Name\"}, ...], ...} (default: the case's arrivals file)"
             default = ""
             arg_type = String
 
         "--scenario"
-            help = "Load arrival scenario to run (default: the only scenario in the arrivals input)"
+            help = "Load arrival scenario to run (default: the case's default scenario, or the only scenario in the arrivals input)"
             default = ""
             arg_type = String
 
@@ -144,14 +144,19 @@ function _apply_slack_args!(args)
     )
 end
 
-# Returns (scenario_name, all_scenarios, arrivals) for the requested or only scenario
+# Returns (scenario_name, all_scenarios, arrivals). Without --scenario: the case default scenario
+# if the arrivals input has it, else the only scenario in the input.
 function _select_arrivals(args)
     all_scenarios = parse_arrivals_scenarios(get(args, "arrivals", ""))
     scenario_name = get(args, "scenario", "")
     if isempty(scenario_name)
-        length(all_scenarios) == 1 || error(
-            "Choose a scenario with --scenario. Available scenarios: $(join(sort(collect(keys(all_scenarios))), ", "))")
-        scenario_name = only(keys(all_scenarios))
+        if haskey(all_scenarios, settings().default_scenario)
+            scenario_name = settings().default_scenario
+        elseif length(all_scenarios) == 1
+            scenario_name = only(keys(all_scenarios))
+        else
+            error("Choose a scenario with --scenario. Available scenarios: $(join(sort(collect(keys(all_scenarios))), ", "))")
+        end
     end
     return scenario_name, all_scenarios, get_arrivals_for_scenario(all_scenarios, scenario_name)
 end

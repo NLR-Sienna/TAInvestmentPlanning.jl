@@ -14,6 +14,7 @@ function _read_json_input(input::AbstractString, description::AbstractString)
         @info "Loaded $description from file: $input"
         return JSON.parse(read(input, String))
     end
+    endswith(lowercase(strip(input)), ".json") && error("$(titlecase(description)) file not found: $(abspath(input))")
     return JSON.parse(input)
 end
 
@@ -47,11 +48,9 @@ function get_arrivals_for_scenario(scenarios::Dict{String, Vector{LoadArrival}},
     error("Scenario \"$scenario_name\" not found. Available scenarios: $(join(sort(collect(keys(scenarios))), ", "))")
 end
 
-function default_arrivals()::Vector{LoadArrival}
-    scenarios = parse_arrivals_scenarios(settings().default_arrivals_path)
-    length(scenarios) == 1 || error("The default arrivals file must contain exactly one scenario: $(settings().default_arrivals_path)")
-    return only(values(scenarios))
-end
+"Arrivals for the case's default scenario (`[scenarios] default_scenario` in case.toml)."
+default_arrivals()::Vector{LoadArrival} =
+    get_arrivals_for_scenario(parse_arrivals_scenarios(settings().default_arrivals_path), settings().default_scenario)
 
 function parse_procurement_timelines(timelines_input::AbstractString)::Union{Dict{String, Tuple{Int, Int}}, Nothing}
     isempty(timelines_input) && return nothing

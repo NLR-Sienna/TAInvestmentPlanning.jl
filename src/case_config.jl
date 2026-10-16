@@ -10,7 +10,8 @@
 #   [solver]             mip_gap, time_limit_s
 #   [planning]           reserve_margin, synthetic_wind_capacity_factor
 #   [base_demand]        name, bus
-#   [scenarios]          default_arrivals, default_procurement_timelines (JSON paths relative to the case)
+#   [scenarios]          arrivals (JSON of load arrival scenarios), default_scenario (name in that file),
+#                        default_procurement_timelines (JSON); paths are relative to the case directory
 #   [pcm]                reference_wind_unit, default_bus
 #   [[planned_additions]] name, kind, bus, capacity_mw, year, id
 #   [candidates]         diesel_heat_rate_mbtu_per_mwh, diesel_start_up_cost, diesel_shut_down_cost,
@@ -83,7 +84,8 @@ function load_planning_settings(path::AbstractString)
         reserve_margin = cfg["planning"]["reserve_margin"],
         synthetic_wind_capacity_factor = cfg["planning"]["synthetic_wind_capacity_factor"],
         base_demand = _nt(cfg["base_demand"]),
-        default_arrivals_path = joinpath(case_dir, cfg["scenarios"]["default_arrivals"]),
+        default_arrivals_path = joinpath(case_dir, cfg["scenarios"]["arrivals"]),
+        default_scenario = cfg["scenarios"]["default_scenario"],
         default_procurement_timelines_path = joinpath(case_dir, cfg["scenarios"]["default_procurement_timelines"]),
         pcm = _nt(cfg["pcm"]),
         report_benchmarks = isnothing(benchmarks) ? nothing : _nt(benchmarks),

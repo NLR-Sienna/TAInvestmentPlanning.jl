@@ -48,8 +48,8 @@ Scenario inputs are JSON files or JSON strings:
 
 | Option | Format | Default |
 |---|---|---|
-| `--arrivals` | `{"scenario": [{"year": 2027, "mw": 1.0, "conforming": true, "bus": "Bus"}, ...]}` | case default arrivals |
-| `--scenario` | scenario name in the arrivals input | the only scenario, if there is one |
+| `--arrivals` | `{"scenario": [{"year": 2027, "mw": 1.0, "conforming": true, "bus": "Bus"}, ...]}` | the case's arrivals file |
+| `--scenario` | scenario name in the arrivals input | the case's default scenario, else the only scenario |
 | `--procurement-timelines` | `{"Tech_Name": [first_year, last_year]}` | case default timelines |
 | `--exogenous-builds` | `{"Tech_Name": {"2030": 4.0}}` (0 = do not build) | none |
 | `--diesel-price` | \$/gal | case default |
@@ -60,7 +60,7 @@ Scenario inputs are JSON files or JSON strings:
 case/
 ├── case.toml       settings, penalties, candidate catalogs, scenario defaults
 ├── case.jl         builds the system and defines the case functions below
-└── scenarios/      default arrivals and procurement timelines (JSON)
+└── scenarios/      load arrival scenarios and default procurement timelines (JSON)
 ```
 
 `case.toml` sections are listed at the top of `src/case_config.jl`; `test/cases/tiny` is a

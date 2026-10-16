@@ -5,8 +5,11 @@
 #   [financial]          discount_rate, base_year, inflation_rate, interest_rate, capital_recovery_period,
 #                        debt_fraction, debt_rate, return_on_equity, tax_rate
 #   [penalties]          unserved_energy_per_mwh, reserve_margin_per_mw_yr
-#   [tier2_fuel]         fuel_limit_gal_per_yr, penalty_per_gal, default_heat_rate_mbtu_per_mwh,
-#                        unit_name_contains (CEM units whose names contain this are capped)
+#   [tier2_fuel]         fuel_limit_gal_per_yr, penalty_per_gal, default_heat_rate_mbtu_per_mwh
+#                        (system-wide cap on fuel burned by all thermal units in the CEM)
+#   [tier2_hours]        hours_per_yr, penalty_per_mwh (CEM operating limit for each Tier 2 unit)
+#   [emission_tiers]     existing_default (tier of existing thermal units), optional [emission_tiers.existing]
+#                        table of unit name = tier overrides; each [[candidates.diesel]] has a tier
 #   [solver]             mip_gap, time_limit_s
 #   [planning]           reserve_margin, synthetic_wind_capacity_factor
 #   [base_demand]        name, bus
@@ -47,7 +50,8 @@ function build_technology_catalog(candidates, planned_additions)
             (kind = "Battery", pcm_bus = b.pcm_bus, power_mw = b.power_mw, energy_mwh = b.energy_mwh)
     end
     for d in candidates.diesel
-        catalog[diesel_candidate_name(d)] = (kind = "Diesel", pcm_bus = d.pcm_bus, capacity_mw = d.capacity_mw)
+        catalog[diesel_candidate_name(d)] =
+            (kind = "Diesel", pcm_bus = d.pcm_bus, capacity_mw = d.capacity_mw, tier = d.tier)
     end
     for w in candidates.wind
         catalog[w.name] = (kind = "Wind", pcm_bus = w.pcm_bus, capacity_mw = w.capacity_mw)
@@ -78,7 +82,10 @@ function load_planning_settings(path::AbstractString)
         tier2_fuel_limit_gal = cfg["tier2_fuel"]["fuel_limit_gal_per_yr"],
         tier2_penalty_per_gal = cfg["tier2_fuel"]["penalty_per_gal"],
         default_heat_rate = cfg["tier2_fuel"]["default_heat_rate_mbtu_per_mwh"],
-        tier2_unit_name_contains = cfg["tier2_fuel"]["unit_name_contains"],
+        tier2_hours_per_yr = cfg["tier2_hours"]["hours_per_yr"],
+        tier2_hours_penalty_per_mwh = cfg["tier2_hours"]["penalty_per_mwh"],
+        existing_unit_tier = cfg["emission_tiers"]["existing_default"],
+        existing_unit_tiers = Dict{String, Int}(get(cfg["emission_tiers"], "existing", Dict())),
         mip_gap = cfg["solver"]["mip_gap"],
         time_limit_s = cfg["solver"]["time_limit_s"],
         reserve_margin = cfg["planning"]["reserve_margin"],
@@ -93,3 +100,15 @@ function load_planning_settings(path::AbstractString)
 end
 
 technology_kind(name::AbstractString) = get(settings().catalog, name, (kind = nothing,)).kind
+
+"""
+    unit_tier(unit_name) -> Int
+
+EPA engine tier of a thermal unit: from the candidate catalog for diesel candidates, otherwise
+from `[emission_tiers]` for existing units.
+"""
+function unit_tier(unit_name::AbstractString)
+    entry = get(settings().catalog, unit_name, nothing)
+    !isnothing(entry) && hasproperty(entry, :tier) && return entry.tier
+    return get(settings().existing_unit_tiers, unit_name, settings().existing_unit_tier)
+end

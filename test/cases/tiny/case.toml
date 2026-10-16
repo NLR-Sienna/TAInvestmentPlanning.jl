@@ -23,7 +23,13 @@ reserve_margin_per_mw_yr = 500000.0
 fuel_limit_gal_per_yr = 4000000.0
 penalty_per_gal = 50.0
 default_heat_rate_mbtu_per_mwh = 11.0
-unit_name_contains = "Diesel"
+
+[tier2_hours]
+hours_per_yr = 100.0
+penalty_per_mwh = 500.0
+
+[emission_tiers]
+existing_default = 2
 
 [solver]
 mip_gap = 0.01
@@ -62,6 +68,7 @@ bus = "East"
 pcm_bus = "East"
 
 [[candidates.diesel]]
+tier = 4
 site = "Main"
 bus = "Main"
 pcm_bus = "Main"

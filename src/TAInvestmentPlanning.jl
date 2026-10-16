@@ -64,7 +64,7 @@ include("load_analytics.jl")
 include("cli.jl")
 
 # Case setup
-export load_case!, active_case, settings, case_dir, case_name
+export load_case!, active_case, settings, case_dir, case_name, unit_tier
 
 # Scenario inputs
 export LoadArrival, parse_arrivals_scenarios, get_arrivals_for_scenario, default_arrivals

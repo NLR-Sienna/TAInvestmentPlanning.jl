@@ -85,7 +85,11 @@ function _arg_settings()
             action = :store_true
 
         "--disable-fuel-cap"
-            help = "Disable the Tier 2 diesel fuel cap in the CEM (limit and penalty are set in case.toml)"
+            help = "Disable the system diesel fuel cap in the CEM (limit and penalty are set in case.toml)"
+            action = :store_true
+
+        "--disable-tier2-hours"
+            help = "Disable the per-unit Tier 2 operating hours limit in the CEM (set in case.toml)"
             action = :store_true
 
         "--exogenous-builds"
@@ -358,7 +362,8 @@ function run_cem_workflow(args::Dict{String, Any})
     exogenous_builds = parse_exogenous_builds(args["exogenous-builds"])
     res = solve_planning(port; results_dir = results_dir, day_start = args["day-start"], day_end = args["day-end"],
                          mip_gap = args["mip-gap"], exogenous_builds = exogenous_builds,
-                         fuel_cap = !args["disable-fuel-cap"], copper_plate = !args["nodal-cem"])
+                         fuel_cap = !args["disable-fuel-cap"],
+                         tier2_hours = !get(args, "disable-tier2-hours", false), copper_plate = !args["nodal-cem"])
 
     println("\nReporting investment results...")
     report_planning_results(res, port)
@@ -658,7 +663,8 @@ function run_validation_workflow(args::Dict{String, Any})
                                          results_dir = planning_dir,
                                          day_start = args["day-start"], day_end = args["day-end"], mip_gap = mip_gap,
                                          exogenous_builds = parse_exogenous_builds(args["exogenous-builds"]),
-                                         fuel_cap = !args["disable-fuel-cap"], copper_plate = !args["nodal-cem"])
+                                         fuel_cap = !args["disable-fuel-cap"],
+                         tier2_hours = !get(args, "disable-tier2-hours", false), copper_plate = !args["nodal-cem"])
         inv_results = _extract_investment_results(cem_results_obj)
         _write_planning_summary(cem_results_obj, portfolio, joinpath(planning_dir, "summary.json"))
 

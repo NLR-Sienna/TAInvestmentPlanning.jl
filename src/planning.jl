@@ -1055,6 +1055,7 @@ function solve_planning(
     solver_time_limit::Float64 = settings().time_limit_s,
     exogenous_builds::Union{Nothing, Dict{String, Dict{Int, Float64}}} = nothing,
     fuel_cap::Bool = true,
+    tier2_hours::Bool = true,
     copper_plate::Bool = true,
 )
     # Convert to absolute path to ensure serialized files go to correct location
@@ -1126,6 +1127,10 @@ function solve_planning(
 
         if fuel_cap
             _apply_diesel_fuel_cap!(model, portfolio)
+        end
+
+        if tier2_hours
+            _apply_tier2_hours_limit!(model, portfolio)
         end
 
         # Write model after solve to include all constraints
@@ -1223,26 +1228,47 @@ function _enforce_procurement_timelines!(
 end
 
 
-function _apply_diesel_fuel_cap!(model::PSI2.InvestmentModel, portfolio::PSIP.Portfolio)
-    jm = model.internal.container.JuMPmodel
-    n_intervals = length(_PORTFOLIO_INTERVAL_DATA[objectid(portfolio)].intervals)
+# Thermal dispatch variables in the CEM: existing ThermalStandard units in the base system and the
+# diesel candidates. Returns (unit, time step, variable) and the sampled-hour scaling to a year.
+function _thermal_dispatch(jm::JuMP.Model, portfolio::PSIP.Portfolio)
+    sys = PSIP.get_base_system(portfolio)
+    thermal_units = Set{String}(PSY.get_name.(PSY.get_components(PSY.ThermalStandard, sys)))
+    for (tech_name, entry) in settings().catalog
+        entry.kind == "Diesel" && push!(thermal_units, tech_name)
+    end
 
     dispatch = Tuple{String, Int, JuMP.VariableRef}[]
     for v in JuMP.all_variables(jm)
         vn = name(v)
         contains(vn, "ActivePowerVariable") || continue
         m = match(r"_\{([^{}]+), (\d+)\}$", vn)
-        (isnothing(m) || !contains(m.captures[1], settings().tier2_unit_name_contains)) && continue
+        (isnothing(m) || !(m.captures[1] in thermal_units)) && continue
         push!(dispatch, (String(m.captures[1]), parse(Int, m.captures[2]), v))
     end
+    isempty(dispatch) && return dispatch, 0, 0.0
+
+    n_intervals = length(_PORTFOLIO_INTERVAL_DATA[objectid(portfolio)].intervals)
+    hours_per_interval = maximum(t for (_, t, _) in dispatch) ÷ n_intervals
+    return dispatch, hours_per_interval, 8760.0 / hours_per_interval
+end
+
+# Rated capacity (MW) of a thermal unit: base system rating for existing units, catalog size for candidates
+function _thermal_capacity_mw(unit::AbstractString, sys::PSY.System)
+    entry = get(settings().catalog, unit, nothing)
+    !isnothing(entry) && return Float64(entry.capacity_mw)
+    gen = PSY.get_component(PSY.ThermalStandard, sys, unit)
+    return PSY.with_units_base(() -> PSY.get_max_active_power(gen), sys, PSY.UnitSystem.NATURAL_UNITS)
+end
+
+# System-wide fuel cap on all thermal units, per investment interval (soft, penalized per gallon)
+function _apply_diesel_fuel_cap!(model::PSI2.InvestmentModel, portfolio::PSIP.Portfolio)
+    jm = model.internal.container.JuMPmodel
+    n_intervals = length(_PORTFOLIO_INTERVAL_DATA[objectid(portfolio)].intervals)
+    dispatch, hours_per_interval, annual_scale = _thermal_dispatch(jm, portfolio)
     if isempty(dispatch)
         @warn "No diesel dispatch variables found; fuel cap not applied"
         return
     end
-
-    n_steps = maximum(t for (_, t, _) in dispatch)
-    hours_per_interval = n_steps ÷ n_intervals
-    annual_scale = 8760.0 / hours_per_interval
 
     fuel = [JuMP.AffExpr(0.0) for _ in 1:n_intervals]
     for (unit, t, v) in dispatch
@@ -1261,7 +1287,40 @@ function _apply_diesel_fuel_cap!(model::PSI2.InvestmentModel, portfolio::PSIP.Po
 
     current_obj = JuMP.objective_function(jm)
     JuMP.@objective(jm, Min, current_obj + settings().tier2_penalty_per_gal * sum(slack))
-    @info "Tier 2 fuel cap: $(Int(settings().tier2_fuel_limit_gal)) gal/yr per interval, \$$(Int(settings().tier2_penalty_per_gal))/gal penalty, $(length(dispatch)) diesel dispatch variables"
+    @info "System diesel fuel cap: $(Int(settings().tier2_fuel_limit_gal)) gal/yr per interval, \$$(Int(settings().tier2_penalty_per_gal))/gal penalty, $(length(dispatch)) diesel dispatch variables"
+    return
+end
+
+# Operating limit for each Tier 2 unit, per investment interval. The CEM has no commitment
+# variables, so hours are full-load equivalent: energy <= hours_per_yr × rated MW (soft, penalized per MWh).
+function _apply_tier2_hours_limit!(model::PSI2.InvestmentModel, portfolio::PSIP.Portfolio)
+    jm = model.internal.container.JuMPmodel
+    sys = PSIP.get_base_system(portfolio)
+    n_intervals = length(_PORTFOLIO_INTERVAL_DATA[objectid(portfolio)].intervals)
+    dispatch, hours_per_interval, annual_scale = _thermal_dispatch(jm, portfolio)
+    filter!(d -> unit_tier(d[1]) == 2, dispatch)
+    if isempty(dispatch)
+        @warn "No Tier 2 dispatch variables found; Tier 2 hours limit not applied"
+        return
+    end
+
+    units = sort(unique(first.(dispatch)))
+    energy = Dict((u, i) => JuMP.AffExpr(0.0) for u in units, i in 1:n_intervals)
+    for (unit, t, v) in dispatch
+        JuMP.add_to_expression!(energy[(unit, div(t - 1, hours_per_interval) + 1)], 1.0, v)
+    end
+    capacity = Dict(u => _thermal_capacity_mw(u, sys) for u in units)
+
+    slack = JuMP.@variable(jm, tier2_hours_slack[units, 1:n_intervals] >= 0)
+    hours = settings().tier2_hours_per_yr
+    JuMP.@constraint(jm, tier2_hours[u = units, i = 1:n_intervals],
+        energy[(u, i)] <= hours * capacity[u] / annual_scale + slack[u, i])
+    jm.ext[:tier2_hours] = (energy = energy, slack = slack, capacity = capacity, annual_scale = annual_scale,
+                            units = units, n_intervals = n_intervals)
+
+    current_obj = JuMP.objective_function(jm)
+    JuMP.@objective(jm, Min, current_obj + settings().tier2_hours_penalty_per_mwh * sum(slack))
+    @info "Tier 2 hours limit: $(hours) h/yr full-load equivalent for $(length(units)) units, \$$(settings().tier2_hours_penalty_per_mwh)/MWh penalty above the limit"
     return
 end
 
@@ -1269,11 +1328,14 @@ function _write_planning_summary(res::PSI2.OptimizationProblemResults, port::PSI
     container = PSI2.get_optimization_container(res.model)
     jm = PSI2.get_jump_model(container)
     t2 = _tier2_fuel_by_interval(res)
+    hours = _tier2_hours_by_interval(res)
     summary = Dict(
         "objective" => JuMP.objective_value(jm),
         "investments_mw" => _extract_investment_results(res),
         "tier2_gallons_per_interval" => isnothing(t2) ? nothing : t2.gallons,
         "tier2_slack_gallons_per_interval" => isnothing(t2) ? nothing : t2.slack,
+        "tier2_hours_excess_mwh_per_interval" => isnothing(hours) ? nothing :
+            [sum(hours.excess_mwh[(u, i)] for u in hours.units) for i in 1:hours.n_intervals],
     )
     open(path, "w") do io
         JSON.print(io, summary, 2)
@@ -1292,6 +1354,25 @@ function _tier2_fuel_by_interval(res::PSI2.OptimizationProblemResults)
         slack = [JuMP.value(v) * scale for v in jm.ext[:tier2_fuel_slack]],
         limit = settings().tier2_fuel_limit_gal,
         penalty = settings().tier2_penalty_per_gal,
+    )
+end
+
+# Annualized full-load-equivalent hours and energy above the limit for each Tier 2 unit and interval
+function _tier2_hours_by_interval(res::PSI2.OptimizationProblemResults)
+    container = PSI2.get_optimization_container(res.model)
+    isnothing(container) && return nothing
+    jm = PSI2.get_jump_model(container)
+    haskey(jm.ext, :tier2_hours) || return nothing
+    h = jm.ext[:tier2_hours]
+    keys_ = [(u, i) for u in h.units, i in 1:h.n_intervals]
+    return (
+        units = h.units,
+        n_intervals = h.n_intervals,
+        capacity = h.capacity,
+        hours = Dict(k => JuMP.value(h.energy[k]) * h.annual_scale / h.capacity[k[1]] for k in keys_),
+        excess_mwh = Dict(k => JuMP.value(h.slack[k...]) * h.annual_scale for k in keys_),
+        limit = settings().tier2_hours_per_yr,
+        penalty = settings().tier2_hours_penalty_per_mwh,
     )
 end
 
@@ -1805,7 +1886,13 @@ function report_planning_results(
                         if !isnothing(t2_now) && i <= length(t2_now.gallons)
                             gal = t2_now.gallons[i]
                             status = t2_now.slack[i] > 1e-6 ? "EXCEEDS by $(round(t2_now.slack[i], digits=0)) gal" : "within limit"
-                            line *= " | Tier 2 diesel: $(round(gal, digits=0)) gal/yr ($status)"
+                            line *= " | Diesel fuel: $(round(gal, digits=0)) gal/yr ($status)"
+                        end
+                        hours_now = _tier2_hours_by_interval(res)
+                        if !isnothing(hours_now) && i <= hours_now.n_intervals
+                            over = [u for u in hours_now.units if hours_now.excess_mwh[(u, i)] > 1e-3]
+                            line *= isempty(over) ? " | Tier 2 hours: all within $(Int(hours_now.limit)) h" :
+                                    " | Tier 2 hours: $(length(over)) of $(length(hours_now.units)) units over $(Int(hours_now.limit)) h"
                         end
                         println(line)
                     end
@@ -1932,13 +2019,26 @@ function report_planning_results(
             # Try to get objective value and cost breakdown from results
             t2 = _tier2_fuel_by_interval(res)
             if !isnothing(t2)
-                println("\nTier 2 Diesel Fuel (fleet, per investment interval):")
+                println("\nDiesel Fuel (all thermal units, per investment interval):")
                 println("  Limit: $(Int(t2.limit)) gal/yr, penalty: \$$(Int(t2.penalty))/gal above limit")
                 for (i, (gal, sl)) in enumerate(zip(t2.gallons, t2.slack))
                     status = sl > 1e-6 ? "EXCEEDS by $(round(sl, digits=0)) gal" : "within limit"
                     println("  Interval $i: $(round(gal, digits=0)) gal/yr ($status)")
                 end
                 println("  Penalty cost: \$$(round(t2.penalty * sum(t2.slack), digits=0))/yr")
+            end
+            hours = _tier2_hours_by_interval(res)
+            if !isnothing(hours)
+                println("\nTier 2 Unit Operation (full-load equivalent hours/yr, per investment interval):")
+                println("  Limit: $(Int(hours.limit)) h/yr per unit, penalty: \$$(hours.penalty)/MWh above limit")
+                println("  " * rpad("Unit", 32) * join([lpad("Int $i", 10) for i in 1:hours.n_intervals]))
+                for u in hours.units
+                    cells = [lpad(string(round(Int, hours.hours[(u, i)])) * (hours.excess_mwh[(u, i)] > 1e-3 ? "*" : ""), 10)
+                             for i in 1:hours.n_intervals]
+                    println("  " * rpad("$u ($(round(hours.capacity[u], digits=2)) MW)", 32) * join(cells))
+                end
+                total_excess = sum(values(hours.excess_mwh))
+                println("  * over the limit. Energy above limits: $(round(total_excess, digits=0)) MWh/yr, penalty cost: \$$(round(hours.penalty * total_excess, digits=0))/yr")
             end
 
             try

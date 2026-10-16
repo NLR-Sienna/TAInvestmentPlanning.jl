@@ -26,7 +26,12 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
         @test s.base_year == 2025
         @test s.financial.capital_recovery_period == 25
         @test s.tier2_fuel_limit_gal == 4.0e6
-        @test s.tier2_unit_name_contains == "Diesel"
+        @test s.tier2_hours_per_yr == 100.0
+        @test s.tier2_hours_penalty_per_mwh == 500.0
+        # Existing thermal units default to Tier 2; candidates carry their own tier
+        @test unit_tier("Diesel_1") == 2
+        @test unit_tier("Diesel_Recip_2MW_Main") == 4
+        @test s.catalog["Diesel_Recip_2MW_Main"].tier == 4
         @test s.base_demand == (name = "Tiny_Demand", bus = "Main")
         @test isnothing(s.report_benchmarks)
         @test isempty(s.planned_additions)
@@ -181,11 +186,14 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
                 end
                 @test cem_results["investment_decisions"] == Dict{String, Float64}(cem["investments_mw"])
 
-                # Tier 2 slack covers exactly the fuel above the annual limit in each interval
+                # Fuel slack covers exactly the fuel above the annual limit in each interval
                 limit = settings().tier2_fuel_limit_gal
                 for (gal, slack) in zip(cem["tier2_gallons_per_interval"], cem["tier2_slack_gallons_per_interval"])
                     @test isapprox(slack, max(gal - limit, 0.0); atol = 1.0)
                 end
+                # One Tier 2 unit (Diesel_1); reported excess energy is nonnegative per interval
+                @test length(cem["tier2_hours_excess_mwh_per_interval"]) == length(cem["tier2_gallons_per_interval"])
+                @test all(>=(-1e-6), cem["tier2_hours_excess_mwh_per_interval"])
 
                 # PCM: 48 h of 8 MW peak load (mean 0.65 of peak) plus the 4 MW flat arrival
                 served = 8.0 * 0.65 * 48 + 4.0 * 48
@@ -205,6 +213,7 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
                 @test cem["investments_mw"] == ref_cem["investments_mw"]
                 @test isapprox(cem["objective"], ref_cem["objective"]; rtol = 1e-6)
                 @test all(isapprox.(cem["tier2_gallons_per_interval"], ref_cem["tier2_gallons_per_interval"]; rtol = 1e-6))
+                @test all(isapprox.(cem["tier2_hours_excess_mwh_per_interval"], ref_cem["tier2_hours_excess_mwh_per_interval"]; rtol = 1e-6, atol = 1e-3))
                 for key in keys(ref_pcm)
                     @test isapprox(pcm[key], ref_pcm[key]; rtol = 1e-6)
                 end

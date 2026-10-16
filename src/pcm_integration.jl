@@ -369,34 +369,67 @@ function run_postoptimal_pcm(
     )
 end
 
-"""
-    report_pcm_results(pcm_results::Dict)
+# Per-unit totals from a realized PCM variable (long DateTime/name/value or wide format)
+function _sum_by_unit(df::DataFrame, f = identity)
+    if hasproperty(df, :name) && hasproperty(df, :value)
+        return Dict(String(k.name) => sum(f, g.value) for (k, g) in pairs(groupby(df, :name)))
+    end
+    return Dict(String(c) => sum(f, skipmissing(df[!, c])) for c in DataFrames.names(df) if eltype(df[!, c]) <: Number)
+end
 
-Print PCM simulation results summary with annual energy demand and generation by resource.
+_n_hours(df::DataFrame) = hasproperty(df, :DateTime) ? length(unique(df.DateTime)) : nrow(df)
+
+"""
+    report_tier2_fuel_pcm(uc_results)
+
+Print diesel fuel (all thermal units) and committed hours of Tier 2 units from PCM dispatch, with
+annualized totals against the case limits. The PCM reports these limits; it does not constrain them.
 """
 function report_tier2_fuel_pcm(uc_results)
     diesel_p = PSI.read_realized_variable(uc_results, PSI.ActivePowerVariable, PSY.ThermalStandard)
     isempty(diesel_p) && return
-    hours = nrow(diesel_p)
+    hours = _n_hours(diesel_p)
     annual_scale = 8760.0 / hours
-    println("\nTier 2 Diesel Fuel (all diesel units, PCM dispatch):")
+    energy = _sum_by_unit(diesel_p)
+
+    println("\nDiesel Fuel (all thermal units, PCM dispatch):")
     println("  Limit: $(Int(settings().tier2_fuel_limit_gal)) gal/yr (PCM reports only; not constrained)")
     total_gal = 0.0
-    for unit in DataFrames.names(diesel_p)
-        unit == "DateTime" && continue
-        col = diesel_p[!, unit]
-        eltype(col) <: Number || continue
-        mwh = sum(skipmissing(col))
+    for unit in sort(collect(keys(energy)))
+        mwh = energy[unit]
         mwh <= 0 && continue
         hr = something(case_rated_heat_rate(unit), settings().default_heat_rate)
         gal = mwh * hr / case_fuel_hhv_mbtu_per_gal() * annual_scale
         total_gal += gal
         println("  $(rpad(unit, 30)) $(round(mwh, digits=0)) MWh simulated, $(round(gal, digits=0)) gal/yr annualized")
     end
-    status = total_gal > settings().tier2_fuel_limit_gal ? "EXCEEDS limit by $(round(total_gal - settings().tier2_fuel_limit_gal, digits=0)) gal/yr" : "within limit"
+    limit = settings().tier2_fuel_limit_gal
+    status = total_gal > limit ? "EXCEEDS limit by $(round(total_gal - limit, digits=0)) gal/yr" : "within limit"
     println("  Total: $(round(total_gal, digits=0)) gal/yr ($status)")
+
+    on = try
+        PSI.read_realized_variable(uc_results, PSI.OnVariable, PSY.ThermalStandard)
+    catch
+        nothing
+    end
+    isnothing(on) && return
+    on_hours = _sum_by_unit(on, x -> x > 0.5 ? 1.0 : 0.0)
+    limit_h = settings().tier2_hours_per_yr
+    println("\nTier 2 Unit Operation (committed hours, PCM; limit $(Int(limit_h)) h/yr per unit, not constrained):")
+    println("  Simulated $(hours) h; limit pro-rated to the simulated period: $(round(limit_h / annual_scale, digits=1)) h")
+    for unit in sort(collect(keys(on_hours)))
+        unit_tier(unit) == 2 || continue
+        h = on_hours[unit]
+        status = h > limit_h / annual_scale + 1e-6 ? "OVER" : "ok"
+        println("  $(rpad(unit, 30)) $(round(Int, h)) h simulated, $(round(Int, h * annual_scale)) h/yr annualized ($status)")
+    end
 end
 
+"""
+    report_pcm_results(pcm_results::Dict)
+
+Print PCM simulation results summary with annual energy demand and generation by resource.
+"""
 function report_pcm_results(pcm_results::Dict)
     sim = get(pcm_results, "simulation", nothing)
     scenario = get(pcm_results, "scenario", :moderate)

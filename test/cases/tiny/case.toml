@@ -1,0 +1,79 @@
+# Tiny test case: two buses, one existing diesel unit, one wind plant, one load.
+
+[case]
+name = "tiny"
+title = "Tiny Test System"
+
+[financial]
+discount_rate = 0.07
+base_year = 2025
+inflation_rate = 0.025
+interest_rate = 0.04
+capital_recovery_period = 25
+debt_fraction = 0.4
+debt_rate = 0.06
+return_on_equity = 0.10
+tax_rate = 0.04
+
+[penalties]
+unserved_energy_per_mwh = 5000.0
+reserve_margin_per_mw_yr = 500000.0
+
+[tier2_fuel]
+fuel_limit_gal_per_yr = 4000000.0
+penalty_per_gal = 50.0
+default_heat_rate_mbtu_per_mwh = 11.0
+unit_name_contains = "Diesel"
+
+[solver]
+mip_gap = 0.01
+time_limit_s = 60.0
+
+[planning]
+reserve_margin = 0.15
+synthetic_wind_capacity_factor = 0.35
+
+[base_demand]
+name = "Tiny_Demand"
+bus = "Main"
+
+[scenarios]
+default_arrivals = "scenarios/default_arrivals.json"
+default_procurement_timelines = "scenarios/default_procurement_timelines.json"
+
+[pcm]
+reference_wind_unit = "Wind_1"
+default_bus = "Main"
+
+[candidates]
+diesel_heat_rate_mbtu_per_mwh = 9.5
+diesel_start_up_cost = 100.0
+diesel_shut_down_cost = 50.0
+battery_efficiency = 0.9
+battery_lifetime_years = 15
+battery_power_cost_share = 0.75
+
+[[candidates.battery]]
+power_mw = 1.0
+energy_mwh = 4.0
+capital_cost_total = 500000.0
+bus = "East"
+pcm_bus = "East"
+
+[[candidates.diesel]]
+site = "Main"
+bus = "Main"
+pcm_bus = "Main"
+unit_name = "Recip_2MW"
+capacity_mw = 2.0
+capital_cost_total = 2000000.0
+fixed_om_per_h = 50.0
+
+[[candidates.wind]]
+name = "Wind_new_1"
+bus = "East"
+pcm_bus = "East"
+capacity_mw = 1.5
+capital_cost_total = 3000000.0
+id = 6
+in_template = true

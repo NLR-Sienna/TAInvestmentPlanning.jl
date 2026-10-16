@@ -1,0 +1,16 @@
+{
+  "investments_mw": {
+    "Wind_new_1": 0.0,
+    "Diesel_Recip_2MW_Main": 0.0,
+    "Battery_1.0MW_4.0MWh": 0.8333333333333314
+  },
+  "objective": 1.2040016029024117e6,
+  "tier2_gallons_per_interval": [
+    1.1474493481578785e6,
+    4.364569102338994e6
+  ],
+  "tier2_slack_gallons_per_interval": [
+    0.0,
+    364569.1023389897
+  ]
+}

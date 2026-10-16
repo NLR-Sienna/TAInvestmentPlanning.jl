@@ -30,6 +30,9 @@ TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 TimeSeries = "9e3dc215-6440-5c97-bce1-76c03772f85e"
 
 [sources]
+# PowerSystemsInvestments shares its UUID with the registered HybridSystemsSimulations package, so it
+# must always come from this source; without it Pkg resolves the UUID to HybridSystemsSimulations.
+PowerSystemsInvestments = {rev = "cb/inv_compat", url = "https://github.com/Sienna-Platform/PowerSystemsInvestments.jl.git"}
 PowerSystemsInvestmentsPortfolios = {rev = "cb/inv_compat", url = "https://github.com/Sienna-Platform/PowerSystemsInvestmentsPortfolios.jl.git"}
 
 [compat]

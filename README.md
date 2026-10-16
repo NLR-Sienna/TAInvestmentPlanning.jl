@@ -7,22 +7,29 @@ technologies, and scenario defaults, so the same workflows run on different data
 
 ## Installation
 
-The package depends on local or branch versions of the Sienna investment packages, declared in
+The package depends on unregistered branches of the Sienna investment packages, declared in
 `[sources]` in `Project.toml`:
 
-- `PowerSystemsInvestments`: local checkout at `../PowerSystemsInvestments.jl` (branch `cb/inv_compat`)
+- `PowerSystemsInvestments`: branch `cb/inv_compat` from GitHub
 - `PowerSystemsInvestmentsPortfolios`: branch `cb/inv_compat` from GitHub
 
-From a project that uses it (for example the Kodiak repo), develop both local checkouts:
+Pkg honors these `[sources]` only when this package is the active project or is developed. A
+project that adds it from GitHub must add both investment packages itself first:
 
 ```julia
 using Pkg
-Pkg.develop(path = "../PowerSystemsInvestments.jl")
-Pkg.develop(path = "../TAInvestmentPlanning.jl")
+Pkg.add([
+    PackageSpec(url = "https://github.com/Sienna-Platform/PowerSystemsInvestments.jl.git", rev = "cb/inv_compat"),
+    PackageSpec(url = "https://github.com/Sienna-Platform/PowerSystemsInvestmentsPortfolios.jl.git", rev = "cb/inv_compat"),
+])
+Pkg.add(url = "https://github.com/NLR-Sienna/TAInvestmentPlanning.jl", rev = "main")
 ```
 
+`PowerSystemsInvestments` has the same UUID as the registered `HybridSystemsSimulations` package.
+Without an explicit source, Pkg resolves it from the General registry and fails.
+
 `PowerSystemsInvestments` declares `__precompile__(false)`, so this package is compiled on each
-load (about 10 s) rather than cached.
+load rather than cached.
 
 ## Running a case
 

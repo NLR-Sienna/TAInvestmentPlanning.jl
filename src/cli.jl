@@ -63,7 +63,7 @@ function _arg_settings()
             arg_type = Float64
 
         "--copper-plate"
-            help = "PCM: Use CopperPlate model (faster, no transmission) instead of NFAPowerModel"
+            help = "PCM: Use CopperPlate model (faster, no transmission) instead of NFANetworkModel"
             action = :store_true
 
         "--battery-sizes"
@@ -237,10 +237,10 @@ function run_pcm_workflow(args::Dict{String, Any})
     # Build or reload system
     if SKIP_SIM && isfile(SYS_JSON)
         @info "Reloading system from $SYS_JSON..."
-        sys = PSY.System(SYS_JSON)
+        sys = PSY.from_file(SYS_JSON)
     else
         sys, _ = build_case_system(; verbose = true, diesel_price = DIESEL_PRICE)
-        PSY.to_json(sys, SYS_JSON, force = true)
+        PSY.to_file(sys, SYS_JSON; force = true)
         @info "System saved → $SYS_JSON"
     end
 
@@ -248,9 +248,7 @@ function run_pcm_workflow(args::Dict{String, Any})
     PSY.transform_single_time_series!(sys, Hour(48), Hour(24))
 
     thermal = collect(PSY.get_components(PSY.ThermalStandard, sys))
-    thermal_mw = PSY.with_units_base(sys, PSY.UnitSystem.NATURAL_UNITS) do
-        sum(PSY.get_max_active_power, thermal; init = 0.0)
-    end
+    thermal_mw = sum(g -> PSY.get_max_active_power(g, u"MW"), thermal; init = 0.0)
     println("\n" * "="^70)
     println("System Summary:")
     println("="^70)
@@ -269,7 +267,7 @@ function run_pcm_workflow(args::Dict{String, Any})
             @info "Test complete. Results: results/test_day180/"
         else
             use_copper_plate = args["copper-plate"]
-            network_model = use_copper_plate ? "CopperPlate (single aggregated bus)" : "NFAPowerModel (nodal network)"
+            network_model = use_copper_plate ? "CopperPlate (single aggregated bus)" : "NFANetworkModel (nodal network)"
             if day_start > 1 || day_end < 365
                 println("Building and running partial window simulation (days $(day_start)-$(day_end))...")
             else
@@ -427,7 +425,7 @@ function run_battery_comparison_workflow(args::Dict{String, Any})
 
     # Step 2: Build post-investment system and run PCM without battery (baseline)
     use_copper_plate = args["copper-plate"]
-    network_model = use_copper_plate ? "CopperPlate (fast)" : "NFAPowerModel (detailed)"
+    network_model = use_copper_plate ? "CopperPlate (fast)" : "NFANetworkModel (detailed)"
 
     @info "\nStep 2: Running baseline PCM on post-investment system (NO battery) [$network_model]..."
     sys_no_battery = build_post_investment_system(inv_results; arrivals = arrivals, diesel_price = diesel_price)
@@ -633,7 +631,7 @@ function run_validation_workflow(args::Dict{String, Any})
     println("Scenario: $scenario")
     println("PCM Optimality Gap: $(mip_gap*100)%")
     println("Diesel Price: \$$(diesel_price)/gal")
-    println("PCM network model: $(use_copper_plate ? "CopperPlate" : "NFAPowerModel")\n")
+    println("PCM network model: $(use_copper_plate ? "CopperPlate" : "NFANetworkModel")\n")
 
     _print_arrivals(scenario_name, all_scenarios, arrivals)
 

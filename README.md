@@ -7,23 +7,29 @@ technologies, and scenario defaults, so the same workflows run on different data
 
 ## Installation
 
-The package depends on unregistered branches of the Sienna investment packages, declared in
-`[sources]` in `Project.toml`:
+The package is built on the PowerSystems 6 development stack. Its Sienna dependencies are
+unregistered branches, declared in `[sources]` in `Project.toml`:
 
-- `PowerSystemsInvestments`: branch `cb/inv_compat` from GitHub
-- `PowerSystemsInvestmentsPortfolios`: branch `cb/inv_compat` from GitHub
+| Package | Branch |
+|---|---|
+| `InfrastructureSystems` | `IS4` |
+| `PowerSystems` | `psy6` |
+| `PowerNetworkMatrices` | `psy6` |
+| `InfrastructureOptimizationModels` | `main` |
+| `PowerOperationsModels` | `main` |
+| `PowerSimulations` | `psy6` |
+| `PowerAnalytics` | `jd/enumx` |
+| `PowerGraphics` | `psy6` |
+| `PowerSystemsInvestments` | `cb/psy6`, local checkout in `../PowerSystemsInvestments.jl` |
+| `PowerSystemsInvestmentsPortfolios` | `cb/psy6`, local checkout in `../PowerSystemsInvestmentsPortfolios.jl` |
+
+`InfrastructureOptimizationModels`, `PowerOperationsModels`, and `PowerNetworkMatrices` are only
+indirect dependencies; they are listed in `[deps]` so that `[sources]` can pin their branches.
+PowerSimulations re-exports the PowerOperationsModels formulations, which include the hydro and
+storage formulations formerly in HydroPowerSimulations and StorageSystemsSimulations.
 
 Pkg honors these `[sources]` only when this package is the active project or is developed. A
-project that adds it from GitHub must add both investment packages itself first:
-
-```julia
-using Pkg
-Pkg.add([
-    PackageSpec(url = "https://github.com/Sienna-Platform/PowerSystemsInvestments.jl.git", rev = "cb/inv_compat"),
-    PackageSpec(url = "https://github.com/Sienna-Platform/PowerSystemsInvestmentsPortfolios.jl.git", rev = "cb/inv_compat"),
-])
-Pkg.add(url = "https://github.com/NLR-Sienna/TAInvestmentPlanning.jl", rev = "main")
-```
+project that adds this package must declare the same sources in its own `Project.toml`.
 
 `PowerSystemsInvestments` has the same UUID as the registered `HybridSystemsSimulations` package.
 Without an explicit source, Pkg resolves it from the General registry and fails.
@@ -49,7 +55,7 @@ julia --project=. run_case.jl --help
 Workflows: `pcm` (base system production cost), `cem` (capacity expansion), `validate` (CEM, then
 PCM of the post-investment system in the planning horizon year), `battery` (battery size
 sensitivity), and `uncertainty` (CEM for every arrivals scenario). Results are written under
-`results/` in the working directory.
+`results/` in the working directory, with plots as interactive HTML files.
 
 Scenario inputs are JSON files or JSON strings:
 
@@ -77,7 +83,7 @@ complete small example.
 
 | Function | Returns |
 |---|---|
-| `build_case_system(; diesel_price, verbose)` | `(system, timestamps)`: the base system with hourly `SingleTimeSeries` covering every planning year, transformed to 48 h / 24 h forecasts, with a `ConstantReserve{ReserveUp}` |
+| `build_case_system(; diesel_price, verbose)` | `(system, timestamps)`: the base system with hourly `SingleTimeSeries` covering every planning year, transformed to 48 h / 24 h forecasts, with an `OnlineReserve{ReserveUp}` |
 | `case_default_diesel_price()` | \$/gal |
 | `case_fuel_hhv_mbtu_per_gal()` | MBTU/gal |
 | `case_base_peak_load_mw()` | base peak load before arrivals |
@@ -94,6 +100,17 @@ Optional (defaults apply when not defined):
 | `case_existing_availability_multiplier(unit_name, year)` | `1.0` |
 | `adjust_planning_system!(sys, rep_years; verbose)` | no change |
 | `adjust_pcm_system!(sys, timestamps)` | no change |
+
+`case.jl` builds the system with the PowerSystems 6 API, as in `test/cases/tiny/case.jl`:
+
+- Component constructors take `input_basis`. With `input_basis = u"CU"`, bare numbers are per
+  unit on the component's base power, as PowerSystems 5 constructors read them.
+- Getters of unit-bearing fields take the units, e.g. `get_max_active_power(gen, u"MW")`. There
+  is no system-wide unit setting (`set_units_base_system!`).
+- `ThermalStandard` status is an `OperationalStates` value.
+- `max_active_power` time series hold normalized profiles and are added without a
+  `scaling_factor_multiplier`; the operational models scale them by each device's max active
+  power.
 
 ## Tests
 

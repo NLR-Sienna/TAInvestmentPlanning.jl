@@ -21,8 +21,7 @@
 Load simulation results from disk and return a named dictionary of DataFrames.
 Each DataFrame has one row per hour (8760 rows) and one column per component.
 
-Values are in natural units (MW for power, MWh for energy, \$ for cost)
-when the system was built with `set_units_base_system!(sys, "NATURAL_UNITS")`.
+Values are in natural units (MW for power, MWh for energy, \$ for cost).
 """
 function load_pcm_results(
     results_dir :: String = joinpath(pwd(), "results"),
@@ -36,6 +35,38 @@ function load_pcm_results(
     uc_results  = PSI.get_decision_problem_results(sim_results, "UC")
 
     return read_pcm_results(uc_results)
+end
+
+# Reserve results are keyed by reserve type; the reserve name is in the `name` column
+# ("<reserve>" for the slack, "<reserve>__<device>" for the provision of each device type).
+
+"""
+    read_reserve_provision(uc_results, reserve_name) -> DataFrame
+
+Realized provision of the `OnlineReserve{ReserveUp}` named `reserve_name` by each
+contributing device (long format: DateTime, name, value with device names).
+"""
+function read_reserve_provision(uc_results, reserve_name::AbstractString) :: DataFrame
+    prefix = "$(reserve_name)__"
+    provision = DataFrame(DateTime = DateTime[], name = String[], value = Float64[])
+    for key in PSI.list_variable_names(uc_results)
+        (startswith(key, "ActivePowerReserveVariable__") && endswith(key, "__OnlineReserve__ReserveUp")) || continue
+        df = PSI.read_realized_variable(uc_results, key)
+        df = df[startswith.(df.name, prefix), :]
+        append!(provision, DataFrame(DateTime = df.DateTime, name = chopprefix.(df.name, prefix), value = df.value))
+    end
+    return provision
+end
+
+"""
+    read_reserve_slack(uc_results, reserve_name) -> DataFrame
+
+Realized requirement slack (unmet reserve) of the `OnlineReserve{ReserveUp}` named
+`reserve_name` (long format: DateTime, name, value).
+"""
+function read_reserve_slack(uc_results, reserve_name::AbstractString) :: DataFrame
+    slack = PSI.read_realized_variable(uc_results, PSI.ReserveRequirementSlack, PSY.OnlineReserve{ReserveUp})
+    return slack[slack.name .== reserve_name, :]
 end
 
 """
@@ -92,7 +123,7 @@ function read_pcm_results(uc_results) :: Dict{Symbol,Any}
 
     # Transformer flows (MW)
     transformer_flows = try
-        PSI.read_realized_variable(uc_results, PSI.FlowActivePowerVariable, PSY.Transformer2W)
+        PSI.read_realized_variable(uc_results, PSI.FlowActivePowerVariable, PSY.TwoWindingTransformer)
     catch
         DataFrame()
     end
@@ -244,6 +275,9 @@ end
 # Transformer overload analysis
 # ---------------------------------------------------------------------------
 
+"Rating (MW) of a two-winding transformer; PowerSystems 6 stores it on the transformer circuit."
+transformer_rating_mw(xfmr::PSY.TwoWindingTransformer) = PSY.get_rating(PSY.get_circuit(xfmr), u"MW")
+
 """
     analyze_transformer_overloads(sys, transformer_flows) -> Dict
 
@@ -273,12 +307,12 @@ function analyze_transformer_overloads(
     end
 
     overloads = []
-    transformers = get_components(PSY.Transformer2W, sys)
+    transformers = get_components(PSY.TwoWindingTransformer, sys)
     total_hours = nrow(transformer_flows)
 
     for xfmr in transformers
         xfmr_name = PSY.get_name(xfmr)
-        xfmr_rating_mw = get_rating(xfmr)
+        xfmr_rating_mw = transformer_rating_mw(xfmr)
 
         # Get flow data for this transformer if it exists
         if xfmr_name in names(transformer_flows)
@@ -651,7 +685,7 @@ function analyze_results(;
         sys_json = case_system_json_path()
         if isfile(sys_json)
             try
-                sys = PSY.System(sys_json)
+                sys = PSY.from_file(sys_json)
             catch e
                 @debug "Could not load system from JSON: $e"
             end

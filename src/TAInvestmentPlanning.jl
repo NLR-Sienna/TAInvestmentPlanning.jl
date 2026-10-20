@@ -7,12 +7,13 @@ Case data and case-specific code live outside the package in a case directory; s
 """
 module TAInvestmentPlanning
 
+# Plotting; loaded before PowerGraphics so it finds the PlotlyLight backend when it initializes
+using PlotlyLight
+
 # Sienna
 using PowerSystems
 using PowerSystems: PrimeMovers
 using PowerSimulations
-using HydroPowerSimulations
-using StorageSystemsSimulations
 using PowerSystemsInvestments
 using PowerSystemsInvestmentsPortfolios
 using PowerAnalytics
@@ -31,11 +32,6 @@ using TimeSeries
 using DelimitedFiles
 import TOML
 
-# Plotting
-using Plots
-using PlotlyJS
-using PlotlyLight
-
 using ArgParse
 using Dates
 using Statistics
@@ -44,8 +40,6 @@ using Logging
 
 const PSY = PowerSystems
 const PSI = PowerSimulations
-const HPS = HydroPowerSimulations
-const SSS = StorageSystemsSimulations
 const PSI2 = PowerSystemsInvestments
 const PSIP = PowerSystemsInvestmentsPortfolios
 const PA = PowerAnalytics
@@ -89,11 +83,5 @@ export get_load_data_with_multipliers, sum_load_data
 # Command-line workflows
 export parse_cmdline, run_pcm_workflow, run_cem_workflow, run_validation_workflow
 export run_battery_comparison_workflow, run_uncertainty_workflow
-
-function __init__()
-    # PowerGraphics plots render through the Plots PlotlyJS backend
-    Plots.plotlyjs()
-    return
-end
 
 end

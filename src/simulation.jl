@@ -9,7 +9,7 @@
 #   - Steps:       364 (one UC solve per day)
 #   - Chronology:  InterProblemChronology (terminal state → next step initial conditions)
 #
-# Network model: CopperPlatePowerModel (no transmission constraints, single bus)
+# Network model: CopperPlateNetworkModel (no transmission constraints, single bus)
 #   Appropriate for an isolated island system with a single aggregated bus.
 #
 # Device formulations:
@@ -34,22 +34,22 @@
 # ---------------------------------------------------------------------------
 
 """
-    build_uc_template(; copper_plate::Bool=false) -> ProblemTemplate
+    build_uc_template(; copper_plate::Bool=false) -> PowerOperationsProblemTemplate
 
 Create the unit commitment problem template.
 
 Parameters:
   copper_plate: If true, use CopperPlate model (single aggregated bus, fastest)
-                If false, use NFAPowerModel (nodal network with transmission, slower but detailed)
+                If false, use NFANetworkModel (nodal network with transmission, slower but detailed)
 """
-function build_uc_template(; copper_plate::Bool=false) :: ProblemTemplate
+function build_uc_template(; copper_plate::Bool=false) :: PowerOperationsProblemTemplate
 
-    # Choose network model: CopperPlate is much faster, NFAPowerModel is more detailed
+    # Choose network model: CopperPlate is much faster, NFANetworkModel is more detailed
     if copper_plate
-        template = ProblemTemplate(NetworkModel(CopperPlatePowerModel, use_slacks=true))
+        template = PowerOperationsProblemTemplate(NetworkModel(CopperPlateNetworkModel, use_slacks=true))
     else
         # Network flow approximation: nodal balance with transmission limits
-        template = ProblemTemplate(NetworkModel(NFAPowerModel, use_slacks=true))
+        template = PowerOperationsProblemTemplate(NetworkModel(NFANetworkModel, use_slacks=true))
     end
 
     # Diesel: full binary unit commitment (on/off/start/stop decisions)
@@ -59,10 +59,10 @@ function build_uc_template(; copper_plate::Bool=false) :: ProblemTemplate
     PSI.set_device_model!(template, PSY.RenewableDispatch, PSI.FixedOutput)
 
     # Hydro: reservoir (storage) and turbine (generation) components
-    PSI.set_device_model!(template, PSY.HydroTurbine, HPS.HydroTurbineEnergyDispatch)
+    PSI.set_device_model!(template, PSY.HydroTurbine, PSI.HydroTurbineEnergyDispatch)
     reservoir_model = PSI.DeviceModel(
         PSY.HydroReservoir,
-        HPS.HydroEnergyModelReservoir;
+        PSI.HydroEnergyModelReservoir;
         attributes = Dict{String, Any}(
             "energy_target" => false,
             "hydro_budget" => false,
@@ -71,16 +71,16 @@ function build_uc_template(; copper_plate::Bool=false) :: ProblemTemplate
     PSI.set_device_model!(template, reservoir_model)
 
     # Battery: energy reservoir storage with dispatch and state-of-charge tracking
-    PSI.set_device_model!(template, PSY.EnergyReservoirStorage, SSS.StorageDispatchWithReserves)
+    PSI.set_device_model!(template, PSY.EnergyReservoirStorage, PSI.StorageDispatchWithReserves)
 
     # Load: fixed (no demand response or load shedding)
     PSI.set_device_model!(template, PSY.PowerLoad, PSI.StaticPowerLoad)
 
     PSI.set_device_model!(template, PSY.Line, PSI.StaticBranchBounds)
-    PSI.set_device_model!(template, PSI.DeviceModel(PSY.Transformer2W, PSI.StaticBranch, use_slacks=true))#PSI.StaticBranchUnbounded)
+    PSI.set_device_model!(template, PSI.DeviceModel(PSY.TwoWindingTransformer, PSI.StaticBranch, use_slacks=true))#PSI.StaticBranchUnbounded)
 
     # Reserve service: ReserveUp (spinning reserve requirement)
-    PSI.set_service_model!(template, PSI.ServiceModel(PSY.ConstantReserve{PSY.ReserveUp}, PSI.RangeReserve, use_slacks = true))
+    PSI.set_service_model!(template, PSI.ServiceModel(PSY.OnlineReserve{PSY.ReserveUp}, PSI.RangeReserve, use_slacks = true))
 
     return template
 end
@@ -103,7 +103,7 @@ Parameters:
   sim_name          Subdirectory name for this simulation run
   mip_gap           MILP relative optimality gap (0.05 = 5%)
   solver_time_limit Maximum seconds per UC solve (30s)
-  copper_plate      Use CopperPlate model (fast, no transmission) instead of NFAPowerModel (default: false)
+  copper_plate      Use CopperPlate model (fast, no transmission) instead of NFANetworkModel (default: false)
 """
 function build_pcm_simulation(
     sys              :: PSY.System;
@@ -231,7 +231,7 @@ function run_single_day_test(
     mkpath(output_dir)
     PSI.build!(model; output_dir = output_dir)
     PSI.solve!(model)
-    results = PSI.OptimizationProblemResults(model)
+    results = PSI.OptimizationProblemOutputs(model)
 
     @info "Single-day solve complete."
     return results

@@ -33,13 +33,15 @@ function build_tiny_system(; diesel_price::Float64 = TINY.diesel_price, verbose:
     Random.seed!(42)
 
     timestamps = collect(DateTime(2025, 1, 1) : Hour(1) : DateTime(2027, 12, 31, 23))
+    # Component values below are per unit on each component's own base (input_basis = CU)
     sys = PSY.System(100.0; time_series_in_memory = true)
-    PSY.set_units_base_system!(sys, "NATURAL_UNITS")
 
     main = PSY.ACBus(; number = 1, name = "Main", available = true, bustype = PSY.ACBusTypes.REF,
-                     angle = 0.0, magnitude = 1.0, voltage_limits = (min = 0.95, max = 1.05), base_voltage = 69.0)
+                     angle = 0.0, magnitude = 1.0, voltage_limits = (min = 0.95, max = 1.05), base_voltage = 69.0,
+                     input_basis = u"CU")
     east = PSY.ACBus(; number = 2, name = "East", available = true, bustype = PSY.ACBusTypes.PQ,
-                     angle = 0.0, magnitude = 1.0, voltage_limits = (min = 0.95, max = 1.05), base_voltage = 69.0)
+                     angle = 0.0, magnitude = 1.0, voltage_limits = (min = 0.95, max = 1.05), base_voltage = 69.0,
+                     input_basis = u"CU")
     PSY.add_component!(sys, main)
     PSY.add_component!(sys, east)
 
@@ -54,13 +56,14 @@ function build_tiny_system(; diesel_price::Float64 = TINY.diesel_price, verbose:
         angle_limits = (min = -π/2, max = π/2),
         active_power_flow = 0.0,
         reactive_power_flow = 0.0,
+        input_basis = u"CU",
     ))
 
     fuel_price_mbtu = diesel_price / TINY.hhv_mbtu_per_gal
     diesel = PSY.ThermalStandard(;
         name = "Diesel_1",
         available = true,
-        status = false,
+        status = PSY.OperationalStates.OFFLINE,
         bus = main,
         active_power = 0.0,
         reactive_power = 0.0,
@@ -72,15 +75,16 @@ function build_tiny_system(; diesel_price::Float64 = TINY.diesel_price, verbose:
         ramp_limits = (up = 1.0, down = 1.0),
         time_limits = (up = 1.0, down = 1.0),
         operation_cost = PSY.ThermalGenerationCost(;
-            variable = PSY.CostCurve(;
+            variable_operation_cost = PSY.CostCurve(;
                 value_curve = PSY.InputOutputCurve(tiny_io_curve(TINY.diesel_hr_curve, fuel_price_mbtu)),
-                power_units = PSY.UnitSystem.NATURAL_UNITS,
+                power_units = PSY.NaturalUnit(),
             ),
             fixed = 10.0,
             start_up = 100.0,
             shut_down = 50.0,
         ),
         base_power = TINY.diesel_mw,
+        input_basis = u"CU",
     )
     PSY.add_component!(sys, diesel)
 
@@ -96,6 +100,7 @@ function build_tiny_system(; diesel_price::Float64 = TINY.diesel_price, verbose:
         power_factor = 1.0,
         operation_cost = PSY.RenewableGenerationCost(nothing),
         base_power = TINY.wind_mw,
+        input_basis = u"CU",
     )
     PSY.add_component!(sys, wind)
 
@@ -108,21 +113,21 @@ function build_tiny_system(; diesel_price::Float64 = TINY.diesel_price, verbose:
         base_power = 1.0,
         max_active_power = TINY.peak_load_mw,
         max_reactive_power = 0.0,
+        input_basis = u"CU",
     )
     PSY.add_component!(sys, load)
 
-    # Smooth deterministic profiles: seasonal and diurnal wind, diurnal load peaking at 1.0
+    # Smooth deterministic profiles: seasonal and diurnal wind, diurnal load peaking at 1.0.
+    # The operational models scale these normalized profiles by each device's max active power.
     wind_cf = [clamp(0.35 + 0.15 * cos(2π * dayofyear(t) / 365) + 0.10 * sin(2π * hour(t) / 24), 0.0, 1.0)
                for t in timestamps]
     load_profile = [0.65 + 0.35 * sin(2π * (hour(t) - 6) / 24) for t in timestamps]
-    PSY.add_time_series!(sys, wind, PSY.SingleTimeSeries(
-        "max_active_power", TimeSeries.TimeArray(timestamps, wind_cf); scaling_factor_multiplier = PSY.get_rating))
-    PSY.add_time_series!(sys, load, PSY.SingleTimeSeries(
-        "max_active_power", TimeSeries.TimeArray(timestamps, load_profile); scaling_factor_multiplier = PSY.get_max_active_power))
+    PSY.add_time_series!(sys, wind, PSY.SingleTimeSeries("max_active_power", TimeSeries.TimeArray(timestamps, wind_cf)))
+    PSY.add_time_series!(sys, load, PSY.SingleTimeSeries("max_active_power", TimeSeries.TimeArray(timestamps, load_profile)))
 
     PSY.transform_single_time_series!(sys, Hour(48), Hour(24))
 
-    reserve = PSY.ConstantReserve{PSY.ReserveUp}(;
+    reserve = PSY.OnlineReserve{PSY.ReserveUp}(;
         name = TINY.reserve_name,
         available = true,
         time_frame = 10.0,

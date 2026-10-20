@@ -66,18 +66,15 @@ function _attach_wind_time_series!(sys::PSY.System, gen::PSY.RenewableDispatch)
             return
         end
 
-        # Copy max_active_power time series from existing wind generator
-        ts_obj = PSY.get_time_series(PSY.SingleTimeSeries, existing_wind, "max_active_power")
-        if isnothing(ts_obj)
+        # Copy max_active_power time series (normalized profile) from existing wind generator
+        if !PSY.has_time_series(existing_wind, PSY.SingleTimeSeries, "max_active_power")
             @debug "Existing wind generator has no max_active_power time series"
             return
         end
+        ta = PSY.get_time_series_array(PSY.SingleTimeSeries, existing_wind, "max_active_power")
 
-        # Extract the underlying TimeArray
-        ta = get_data(ts_obj)
-
-        # Create new time series with the same data and scaling function
-        new_ts = PowerSystems.SingleTimeSeries("max_active_power", ta; scaling_factor_multiplier=PSY.get_rating)
+        # Create new time series with the same data
+        new_ts = PowerSystems.SingleTimeSeries("max_active_power", ta)
         PSY.add_time_series!(sys, gen, new_ts)
         @info "Attached wind time series to $(PSY.get_name(gen))"
 
@@ -94,7 +91,7 @@ Internal helper: instantiate a new generator in the system based on investment d
 For renewables: creates RenewableDispatch with zero operating cost.
 For diesel: creates ThermalStandard with fuel cost curve from build_system.jl.
 
-All power values are converted from MW to per-unit using system base power (100.0 MW).
+All power values are converted from MW to per-unit on the component base, which is the system base power (100.0 MW).
 """
 function _add_investment_to_system!(sys::PSY.System, tech_name::String, capacity_mw::Float64, timestamps::Vector{DateTime}, diesel_price::Float64=case_default_diesel_price())
     entry = get(settings().catalog, tech_name, nothing)
@@ -119,6 +116,7 @@ function _add_investment_to_system!(sys::PSY.System, tech_name::String, capacity
             reactive_power_limits = nothing,
             base_power = sys_base_power,
             operation_cost = PSY.RenewableGenerationCost(nothing),
+            input_basis = u"CU",
         )
         PSY.add_component!(sys, gen)
 
@@ -134,7 +132,7 @@ function _add_investment_to_system!(sys::PSY.System, tech_name::String, capacity
         gen = PSY.ThermalStandard(;
             name = tech_name,
             available = true,
-            status = true,  # Allow diesel unit to operate
+            status = PSY.OperationalStates.ONLINE,  # Allow diesel unit to operate
             bus = bus,
             active_power = 0.0,
             reactive_power = 0.0,
@@ -144,9 +142,9 @@ function _add_investment_to_system!(sys::PSY.System, tech_name::String, capacity
             ramp_limits = (up=capacity_pu, down=capacity_pu),
             time_limits = (up=1, down=1),
             operation_cost = PSY.ThermalGenerationCost(;
-                variable = PSY.CostCurve(;
+                variable_operation_cost = PSY.CostCurve(;
                     value_curve = PSY.InputOutputCurve(diesel_io_curve(hr_curve, fuel_price_mbtu)),
-                    power_units = PSY.UnitSystem.NATURAL_UNITS,
+                    power_units = PSY.NaturalUnit(),
                 ),
                 fixed = 0.0,
                 start_up = settings().candidates.diesel_start_up_cost,
@@ -155,6 +153,7 @@ function _add_investment_to_system!(sys::PSY.System, tech_name::String, capacity
             prime_mover_type = PSY.PrimeMovers.IC,
             fuel = PSY.ThermalFuels.DISTILLATE_FUEL_OIL,
             base_power = sys_base_power,
+            input_basis = u"CU",
         )
         PSY.add_component!(sys, gen)
 
@@ -208,6 +207,7 @@ function _add_load_arrivals_to_system!(sys::PSY.System, arrivals::Vector, timest
             max_active_power = arrival_mw,  # MW directly
             max_reactive_power = 0.0,
             base_power = 1.0,  # 1 MW base so values are in MW not per-unit
+            input_basis = u"CU",
         )
 
         PSY.add_component!(sys, load)
@@ -229,14 +229,14 @@ function _add_load_arrivals_to_system!(sys::PSY.System, arrivals::Vector, timest
                 end
 
                 ta = TimeSeries.TimeArray(timestamps, custom_profile)
-                ts = PSY.SingleTimeSeries("max_active_power", ta; scaling_factor_multiplier=PSY.get_max_active_power)
+                ts = PSY.SingleTimeSeries("max_active_power", ta)
                 PSY.add_time_series!(sys, load, ts)
                 @info "Added load arrival: $load_name ($(arrival.mw) MW with custom profile from $(arrival.custom_profile_path), bus=$bus_name)"
             catch e
                 @warn "Could not load custom profile from $(arrival.custom_profile_path): $e. Using flat profile instead."
                 flat_profile = fill(1.0, length(timestamps))
                 ta = TimeSeries.TimeArray(timestamps, flat_profile)
-                ts = PSY.SingleTimeSeries("max_active_power", ta; scaling_factor_multiplier=PSY.get_max_active_power)
+                ts = PSY.SingleTimeSeries("max_active_power", ta)
                 PSY.add_time_series!(sys, load, ts)
                 @info "Added load arrival: $load_name ($(arrival.mw) MW flat, bus=$bus_name)"
             end
@@ -245,7 +245,7 @@ function _add_load_arrivals_to_system!(sys::PSY.System, arrivals::Vector, timest
             # Use 1.0 for every hour (100% of max_active_power) to represent constant load
             flat_profile = fill(1.0, length(timestamps))
             ta = TimeSeries.TimeArray(timestamps, flat_profile)
-            ts = PSY.SingleTimeSeries("max_active_power", ta; scaling_factor_multiplier=PSY.get_max_active_power)
+            ts = PSY.SingleTimeSeries("max_active_power", ta)
             PSY.add_time_series!(sys, load, ts)
             @info "Added load arrival: $load_name ($(arrival.mw) MW constant, bus=$bus_name)"
         end
@@ -269,7 +269,7 @@ Arguments:
   scenario: Symbol for load profile scenario (:base, :moderate, :high)
   results_dir: Directory where simulation results will be written
   mip_gap: MILP optimality gap for solver
-  copper_plate: Use CopperPlate model (fast) instead of NFAPowerModel (default: false)
+  copper_plate: Use CopperPlate model (fast) instead of NFANetworkModel (default: false)
   arrivals: Optional vector of LoadArrival objects to add as new loads (for validation)
 
 Returns:
@@ -301,7 +301,7 @@ function run_postoptimal_pcm(
     @info "  Total PowerLoad components: $(length(all_loads))"
     @info "  Load arrivals: $(length(arrival_loads))"
     for load in arrival_loads
-        @info "    - $(PSY.get_name(load)) ($(PSY.get_active_power(load)) MW)"
+        @info "    - $(PSY.get_name(load)) ($(PSY.get_active_power(load, u"MW")) MW)"
     end
 
     # Check time series format of existing loads vs new arrivals
@@ -309,7 +309,7 @@ function run_postoptimal_pcm(
         existing_load = first(all_loads)
         if !startswith(PSY.get_name(existing_load), "Arrival_")
             try
-                ts_existing = PSY.get_time_series(existing_load, "max_active_power")
+                ts_existing = PSY.get_time_series(PSY.SingleTimeSeries, existing_load, "max_active_power")
                 @info "Existing load time series type: $(typeof(ts_existing))"
             catch e
                 @info "Could not read existing load time series: $e"
@@ -319,7 +319,7 @@ function run_postoptimal_pcm(
     if !isempty(arrival_loads)
         arrival_load = first(arrival_loads)
         try
-            ts_arrival = PSY.get_time_series(arrival_load, "max_active_power")
+            ts_arrival = PSY.get_time_series(PSY.SingleTimeSeries, arrival_load, "max_active_power")
             @info "Arrival load time series type: $(typeof(ts_arrival))"
         catch e
             @info "Could not read arrival load time series: $e"
@@ -440,7 +440,6 @@ function report_pcm_results(pcm_results::Dict)
         @warn "Cannot report PCM results: missing simulation or system"
         return
     end
-    set_units_base_system!(sys, PSY.UnitSystem.NATURAL_UNITS)  # Ensure system is in MW/MWh for reporting
 
     println("\n" * "="^70)
     println("PCM Simulation Results ($scenario scenario)")
@@ -450,7 +449,7 @@ function report_pcm_results(pcm_results::Dict)
     println("System Configuration:")
 
     # Total generation capacity from all generators
-    total_gen_capacity_mw = sum(PSY.get_max_active_power(g) for g in PSY.get_components(PSY.Generator, sys))
+    total_gen_capacity_mw = sum(PSY.get_max_active_power(g, u"MW") for g in PSY.get_components(PSY.Generator, sys))
     println("  Total system generation capacity: $(round(total_gen_capacity_mw, digits=1)) MW")
 
     # Calculate peak load and annual demand from actual simulation time series
@@ -570,7 +569,7 @@ function report_pcm_results(pcm_results::Dict)
     try
         # Load transformer flow data from results
         transformer_flows = try
-            PSI.read_realized_variable(uc_results, PSI.FlowActivePowerVariable, PSY.Transformer2W)
+            PSI.read_realized_variable(uc_results, PSI.FlowActivePowerVariable, PSY.TwoWindingTransformer)
         catch e
             @debug "Could not read transformer flows: $e"
             nothing
@@ -580,8 +579,8 @@ function report_pcm_results(pcm_results::Dict)
             @info "Analyzing transformer overloads..."
 
             # Build rating lookup from system components
-            transformers = get_components(PSY.Transformer2W, sys)
-            ratings_dict = Dict(PSY.get_name(x) => PSY.get_rating(x) for x in transformers)
+            transformers = get_components(PSY.TwoWindingTransformer, sys)
+            ratings_dict = Dict(PSY.get_name(x) => transformer_rating_mw(x) for x in transformers)
 
             # transformer_flows is a long-format DataFrame with columns: DateTime, name, value
             # Group by transformer name and calculate statistics
@@ -719,7 +718,7 @@ function report_pcm_results(pcm_results::Dict)
 
     # Unserved reserve - use ReserveRequirementSlack if available
     try
-        reserve_slack = PSI.read_realized_variable(uc_results, PSI.ReserveRequirementSlack, PSY.ConstantReserve{ReserveUp}, case_operating_reserve_name())
+        reserve_slack = read_reserve_slack(uc_results, case_operating_reserve_name())
         total_unserved_reserve_mwh = if !isempty(reserve_slack) && size(reserve_slack, 1) > 0
             sum(col -> eltype(col) <: Number ? sum(skipmissing(col)) : 0.0, eachcol(reserve_slack))
         else
@@ -855,7 +854,7 @@ end
 Build and save a plot with multiple battery cost sensitivity traces.
 
 Arguments:
-  traces: Vector of PlotlyJS trace objects
+  traces: Vector of Plotly trace Dicts (e.g. `Dict("type" => "scatter", "x" => ..., "y" => ...)`)
   title: Plot title
   output_dir: Directory where plot will be saved
   output_file: Filename for the HTML output
@@ -876,20 +875,20 @@ function build_battery_sensitivity_plot(
     mkpath(output_dir)
 
     try
-        layout = PlotlyJS.Layout(
-            title = title,
-            xaxis = PlotlyJS.attr(title = "Battery Capacity (MW)"),
-            yaxis = PlotlyJS.attr(title = "Annual Operating Cost (\$)"),
-            height = 500,
-            width = 900,
-            hovermode = "closest",
+        layout = Dict{String, Any}(
+            "title" => title,
+            "xaxis" => Dict("title" => "Battery Capacity (MW)"),
+            "yaxis" => Dict("title" => "Annual Operating Cost (\$)"),
+            "height" => 500,
+            "width" => 900,
+            "hovermode" => "closest",
         )
 
-        p = PlotlyJS.plot(traces, layout)
+        p = PlotlyLight.Plot(traces, layout)
 
         # Save plot
         plot_path = joinpath(output_dir, output_file)
-        PlotlyJS.savefig(p, plot_path)
+        PlotlyLight.save(p, plot_path)
         @info "Battery sensitivity plot saved: $plot_path"
 
         return p, plot_path
@@ -926,14 +925,15 @@ function plot_battery_cost_relationship(
     end
 
     # Create trace
-    trace = PlotlyJS.scatter(
-        x = battery_mws,
-        y = costs,
-        mode = "lines+markers",
-        marker = PlotlyJS.attr(size = 8, color = "#1f77b4"),
-        line = PlotlyJS.attr(width = 2),
-        name = "Diesel \$5.00/gal",
-        hovertemplate = "<b>Battery: %{x} MW</b><br>Annual Cost: \$%{y:,.0f}<extra></extra>",
+    trace = Dict{String, Any}(
+        "type" => "scatter",
+        "x" => battery_mws,
+        "y" => costs,
+        "mode" => "lines+markers",
+        "marker" => Dict("size" => 8, "color" => "#1f77b4"),
+        "line" => Dict("width" => 2),
+        "name" => "Diesel \$5.00/gal",
+        "hovertemplate" => "<b>Battery: %{x} MW</b><br>Annual Cost: \$%{y:,.0f}<extra></extra>",
     )
 
     # Build and save plot
@@ -1007,6 +1007,7 @@ function add_battery_to_system!(sys::PSY.System, bus_name::String, rating_mw::Fl
         reactive_power = 0.0,
         reactive_power_limits = (min = 0.0, max = 0.0),
         base_power = sys_base_power,
+        input_basis = u"CU",
     )
 
     try

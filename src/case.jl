@@ -94,7 +94,7 @@ case_base_peak_load_mw() = _call_case(:case_base_peak_load_mw)
 "Calendar year of the base time series."
 case_simulation_year() = _call_case(:case_simulation_year)
 
-"Name of the operating reserve (ConstantReserve{ReserveUp}) in the system."
+"Name of the operating reserve (OnlineReserve{ReserveUp}) in the system."
 case_operating_reserve_name() = _call_case(:case_operating_reserve_name)
 
 "Existing hydro rating in MW, used for capacity factors in the PCM report."

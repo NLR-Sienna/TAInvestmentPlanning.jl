@@ -223,9 +223,8 @@ function build_rep_period_timestamps(rep_year::Int)
     return all_ts
 end
 
-function _add_transmission_technologies!(port::PSIP.Portfolio, sys::PSY.System, nodes::Dict{String, PSIP.Node}, fin_data::PSIP.TechnologyFinancialData)
+function _add_transmission_technologies!(port::PSIP.Portfolio, sys::PSY.System, nodes::Dict{String, PSY.ACBus}, fin_data::PSIP.TechnologyFinancialData)
     """Add transmission lines and transformers as NodalACTransportTechnology objects."""
-    tech_id = 100  # Starting ID for transmission techs
 
     # Add lines (5 total)
     # Use large capacity limits (1000 MW) to not constrain optimization in planning stage
@@ -248,18 +247,16 @@ function _add_transmission_technologies!(port::PSIP.Portfolio, sys::PSY.System, 
             start_node = start_node,
             end_node = end_node,
             available = true,
-            capacity_limits = (min=-MAX_LINE_CAPACITY, max=MAX_LINE_CAPACITY),
-            capital_costs = PSIP.LinearCurve(0.0),  # Existing assets, no investment
+            capacity_limits = (min=0.0, max=MAX_LINE_CAPACITY),
+            capital_costs = PSIP.CapitalCost(; capital_cost = PSIP.LinearCurve(0.0)),  # Existing assets, no investment
             power_systems_type = "Line",
-            id = tech_id,
             financial_data = fin_data,
         )
         PSIP.add_technology!(port, line_tech)
-        tech_id += 1
     end
 
     # Add transformers (2 total)
-    for tf in PSY.get_components(PSY.Transformer2W, sys)
+    for tf in PSY.get_components(PSY.TwoWindingTransformer, sys)
         name = PSY.get_name(tf)
         arc = PSY.get_arc(tf)
         from_bus = PSY.get_name(PSY.get_from(arc))
@@ -270,19 +267,17 @@ function _add_transmission_technologies!(port::PSIP.Portfolio, sys::PSY.System, 
         end_node = nodes[to_bus]
 
         # Create NodalACTransportTechnology for transformer
-        tf_tech = PSIP.NodalACTransportTechnology{PSY.Transformer2W}(;
+        tf_tech = PSIP.NodalACTransportTechnology{PSY.TwoWindingTransformer}(;
             name = name,
             start_node = start_node,
             end_node = end_node,
             available = true,
-            capacity_limits = (min=-MAX_LINE_CAPACITY, max=MAX_LINE_CAPACITY),
-            capital_costs = PSIP.LinearCurve(0.0),  # Existing assets, no investment
-            power_systems_type = "Transformer2W",
-            id = tech_id,
+            capacity_limits = (min=0.0, max=MAX_LINE_CAPACITY),
+            capital_costs = PSIP.CapitalCost(; capital_cost = PSIP.LinearCurve(0.0)),  # Existing assets, no investment
+            power_systems_type = "TwoWindingTransformer",
             financial_data = fin_data,
         )
         PSIP.add_technology!(port, tf_tech)
-        tech_id += 1
     end
 end
 
@@ -330,17 +325,8 @@ function build_planning_portfolio(
         settings().financial.interest_rate,
     )
 
-    # Create 8 nodes (one per bus) for nodal transmission-constrained model
-    # Suppress "Node does not exist in validation configuration" warnings from InfrastructureSystems
-    bus_names = [PSY.get_name(b) for b in PSY.get_components(PSY.ACBus, sys)]
-    nodes = Dict{String, PSIP.Node}()
-    with_logger(NullLogger()) do
-        for (idx, bus_name) in enumerate(sort(bus_names))
-            node = PSIP.Node(name=bus_name, id=idx)
-            nodes[bus_name] = node
-            PSIP.add_region!(port, node)
-        end
-    end
+    # Nodes for the nodal transmission-constrained model: the portfolio uses the base system's buses
+    nodes = Dict{String, PSY.ACBus}(PSY.get_name(b) => b for b in PSY.get_components(PSY.ACBus, sys))
 
     # Create financial data (reused for all technologies)
     fin_data = PSIP.TechnologyFinancialData(;
@@ -367,7 +353,8 @@ function build_planning_portfolio(
 
     # Operational costs for renewable technologies (zero variable/fixed cost)
     renewable_op_cost = PowerSystems.RenewableGenerationCost(;
-        variable = PowerSystems.CostCurve(PSIP.LinearCurve(0.0)),
+        variable_operation_cost = PowerSystems.CostCurve(PSIP.LinearCurve(0.0)),
+        curtailment_cost = PowerSystems.CostCurve(PSIP.LinearCurve(0.0)),
         fixed = 0.0,
     )
 
@@ -375,9 +362,8 @@ function build_planning_portfolio(
     demand = PSIP.DemandRequirement{PowerSystems.PowerLoad}(;
         name = settings().base_demand.name,
         power_systems_type = "PowerLoad",
-        peak_demand_mw = peak_mws[1],
+        new_demand_mw = peak_mws[1],
         value_of_lost_load = settings().unserved_energy_per_mwh,
-        id = 1,
         region = [nodes[settings().base_demand.bus]],
     )
     PSIP.add_technology!(port, demand)
@@ -394,9 +380,8 @@ function build_planning_portfolio(
         const_load = PSIP.DemandRequirement{PowerSystems.PowerLoad}(;
             name = load_name,
             power_systems_type = "PowerLoad",
-            peak_demand_mw = arrival.mw,
+            new_demand_mw = arrival.mw,
             value_of_lost_load = settings().unserved_energy_per_mwh,
-            id = 1 + i,
             region = [node],
         )
         PSIP.add_technology!(port, const_load)
@@ -424,10 +409,9 @@ function build_planning_portfolio(
             region = [nodes[addition.bus]],
             available = true,
             capacity_limits = (min=0.0, max=addition.capacity_mw),
-            capital_costs = PSIP.LinearCurve(0.0),
+            capital_costs = PSIP.CapitalCost(; capital_cost = PSIP.LinearCurve(0.0)),
             operation_costs = renewable_op_cost,
             unit_size = addition.capacity_mw,
-            id = addition.id,
             financial_data = fin_data,
             prime_mover_type = PowerSystems.PrimeMovers.WT,
         ))
@@ -441,10 +425,9 @@ function build_planning_portfolio(
             region = [nodes[wind.bus]],
             available = true,
             capacity_limits = (min=0.0, max=wind.capacity_mw),
-            capital_costs = PSIP.LinearCurve(wind.capital_cost_total),
+            capital_costs = PSIP.CapitalCost(; capital_cost = PSIP.LinearCurve(wind.capital_cost_total)),
             operation_costs = renewable_op_cost,
             unit_size = wind.capacity_mw,
-            id = wind.id,
             financial_data = fin_data,
             prime_mover_type = PowerSystems.PrimeMovers.WT,
         ))
@@ -452,12 +435,11 @@ function build_planning_portfolio(
 
     # Add candidate battery storage options (continuous investment, multiple configurations)
     # CEM chooses which to build and how much
-    battery_op_cost = PSIP.StorageCost()
+    battery_op_cost = PSIP.StorageCost(nothing)
     battery_options = settings().candidates.battery
     battery_efficiency = settings().candidates.battery_efficiency
     power_cost_share = settings().candidates.battery_power_cost_share
 
-    battery_id = 10
     for opt in battery_options
         battery = PSIP.StorageTechnology{PowerSystems.EnergyReservoirStorage}(;
             name = "Battery_$(opt.power_mw)MW_$(opt.energy_mwh)MWh",
@@ -471,26 +453,24 @@ function build_planning_portfolio(
             capacity_limits_charge = (min=0.0, max=opt.power_mw),
             capacity_limits_energy = (min=0.0, max=opt.energy_mwh),
             duration_limits = (min=opt.energy_mwh / opt.power_mw, max=opt.energy_mwh / opt.power_mw),
-            capital_costs_discharge = PSIP.LinearCurve(opt.capital_cost_total * power_cost_share / opt.power_mw),
-            capital_costs_charge = PSIP.LinearCurve(0.0),  # power rating already costed via discharge
-            capital_costs_energy = PSIP.LinearCurve(opt.capital_cost_total * (1 - power_cost_share) / opt.energy_mwh),
+            capital_costs = PSIP.StorageCapitalCost(;
+                discharge_capital_cost = PSIP.LinearCurve(opt.capital_cost_total * power_cost_share / opt.power_mw),
+                charge_capital_cost = PSIP.LinearCurve(0.0),  # power rating already costed via discharge
+                energy_capital_cost = PSIP.LinearCurve(opt.capital_cost_total * (1 - power_cost_share) / opt.energy_mwh),
+            ),
             efficiency = (in=battery_efficiency, out=battery_efficiency),
             operation_costs = battery_op_cost,
-            id = battery_id,
             financial_data = fin_data,
         )
         PSIP.add_technology!(port, battery)
-        battery_id += 1
     end
 
     # Add discrete diesel generator options (binary investment decisions)
     # Each unit is a specific real-world model that can be purchased (binary choice)
     # Capital cost is total cost per unit, not per MW
-    diesel_id = 9
-
     for opt in settings().candidates.diesel
         diesel_op_cost = PowerSystems.ThermalGenerationCost(;
-            variable = PowerSystems.CostCurve(PSIP.LinearCurve(settings().candidates.diesel_heat_rate_mbtu_per_mwh * diesel_price / case_fuel_hhv_mbtu_per_gal())),
+            variable_operation_cost = PowerSystems.CostCurve(PSIP.LinearCurve(settings().candidates.diesel_heat_rate_mbtu_per_mwh * diesel_price / case_fuel_hhv_mbtu_per_gal())),
             fixed = opt.fixed_om_per_h,
             start_up = settings().candidates.diesel_start_up_cost,
             shut_down = settings().candidates.diesel_shut_down_cost,
@@ -501,15 +481,13 @@ function build_planning_portfolio(
             region = [nodes[opt.bus]],
             available = true,
             capacity_limits = (min=0.0, max=opt.capacity_mw),
-            capital_costs = PSIP.LinearCurve(opt.capital_cost_total),
+            capital_costs = PSIP.CapitalCost(; capital_cost = PSIP.LinearCurve(opt.capital_cost_total)),
             operation_costs = diesel_op_cost,
             unit_size = opt.capacity_mw,
-            id = diesel_id,
             financial_data = fin_data,
             prime_mover_type = PowerSystems.PrimeMovers.IC,
         )
         PSIP.add_technology!(port, unit)
-        diesel_id += 1
     end
 
     # Add transmission technologies (lines and transformers)
@@ -617,7 +595,7 @@ function _attach_time_series_to_portfolio!(
                     multiplier = case_existing_availability_multiplier(PSY.get_name(existing_wind), rep_year)
                     wind_cf_scaled = wind_cf_hourly .* multiplier
                     _add_single_time_series_to_device!(base_system, existing_wind, "max_active_power",
-                                                       rep_day_stamps, wind_cf_scaled, month_num, year_str, PSY.get_max_active_power)
+                                                       rep_day_stamps, wind_cf_scaled, month_num, year_str)
                 end
             end
 
@@ -703,19 +681,14 @@ function _add_single_time_series!(port, tech, ts_name, timestamps, values, rep_d
     # Add a single-day time series to a technology with year/rep_day metadata tags
     ta = TimeSeries.TimeArray(timestamps, values)
     ts = PowerSystems.SingleTimeSeries(ts_name, ta)
-    PSIP.add_time_series!(port, tech, ts; year=year_str, rep_day=rep_day)
+    PSIP.add_time_series!(port, tech, ts; features = Dict("year" => year_str, "rep_day" => rep_day))
 end
 
 function _add_single_time_series_to_device!(system::PSY.System, device::PSY.Component, ts_name::String,
-                                           timestamps, values, rep_day, year_str, scaling_fn::Union{Nothing, Function}=nothing)
-    # Add a single-day time series to a base_system device
-    # If scaling_fn provided, it's used as the multiplier function (e.g., get_max_active_power for capacity factors)
+                                           timestamps, values, rep_day, year_str)
+    # Add a single-day time series (normalized profile) to a base_system device
     ta = TimeSeries.TimeArray(timestamps, values)
-    if !isnothing(scaling_fn)
-        ts = PowerSystems.SingleTimeSeries(ts_name, ta; scaling_factor_multiplier=scaling_fn)
-    else
-        ts = PowerSystems.SingleTimeSeries(ts_name, ta)
-    end
+    ts = PowerSystems.SingleTimeSeries(ts_name, ta)
     try
         PSY.add_time_series!(system, device, ts)
     catch e
@@ -928,7 +901,7 @@ end
 function _existing_capacity_mw(portfolio)
     sys = PSIP.get_base_system(portfolio)
     isnothing(sys) && return 0.0
-    return sum(PSY.get_max_active_power(gen) for gen in PSY.get_components(PSY.Generator, sys); init=0.0)
+    return sum(PSY.get_max_active_power(gen, u"MW") for gen in PSY.get_components(PSY.Generator, sys); init=0.0)
 end
 
 function _credit_for_build_variable(var_name::AbstractString, credits::Dict{String, Float64})
@@ -945,7 +918,7 @@ function _existing_effective_capacity_mw(portfolio, credits::Dict{String, Float6
     sys = PSIP.get_base_system(portfolio)
     isnothing(sys) && return 0.0
     return sum(
-        PSY.get_max_active_power(gen) * get(credits, PSY.get_name(gen), 0.0)
+        PSY.get_max_active_power(gen, u"MW") * get(credits, PSY.get_name(gen), 0.0)
         for gen in PSY.get_components(PSY.Generator, sys);
         init=0.0,
     )
@@ -1257,7 +1230,7 @@ function _thermal_capacity_mw(unit::AbstractString, sys::PSY.System)
     entry = get(settings().catalog, unit, nothing)
     !isnothing(entry) && return Float64(entry.capacity_mw)
     gen = PSY.get_component(PSY.ThermalStandard, sys, unit)
-    return PSY.with_units_base(() -> PSY.get_max_active_power(gen), sys, PSY.UnitSystem.NATURAL_UNITS)
+    return PSY.get_max_active_power(gen, u"MW")
 end
 
 # System-wide fuel cap on all thermal units, per investment interval (soft, penalized per gallon)
@@ -1415,7 +1388,7 @@ function _existing_capacity_by_type(port::PSIP.Portfolio)
             pm == PSY.PrimeMovers.WT ? "Wind" :
             pm == PSY.PrimeMovers.PVe ? "Solar" :
             pm == PSY.PrimeMovers.BA ? "Battery" : "Other"
-        totals[t] = get(totals, t, 0.0) + PSY.get_max_active_power(gen)
+        totals[t] = get(totals, t, 0.0) + PSY.get_max_active_power(gen, u"MW")
     end
     return totals
 end
@@ -1508,7 +1481,7 @@ function _fix_exogenous_builds!(
     thermal = Set{String}()
     for tech in PSIP.get_technologies(PSIP.SupplyTechnology, portfolio)
         name = PSIP.get_name(tech)
-        ratings[name] = PSIP.get_capacity_limits(tech).max
+        ratings[name] = PSIP.get_capacity_limits(tech, PSIP.NU).max
         tech isa PSIP.SupplyTechnology{PSY.ThermalStandard} && push!(thermal, name)
     end
 
@@ -1537,6 +1510,12 @@ function _fix_exogenous_builds!(
     @info "Fixed $n_fixed build variables from exogenous build inputs for $(length(matched)) technologies"
     return
 end
+
+# Overnight capital cost curve of a supply or transmission technology; storage capital costs are
+# split by component, so storage has none
+_capital_cost_curve(::PSIP.Technology) = nothing
+_capital_cost_curve(tech::Union{PSIP.SupplyTechnology, PSIP.TransmissionTechnology}) =
+    PSIP.get_capital_cost(PSIP.get_capital_costs(tech))
 
 function _extract_investment_results(res::PSI2.OptimizationProblemResults)
     results = Dict{String, Float64}()
@@ -1641,10 +1620,10 @@ function report_planning_results(
             name = PSIP.get_name(tech)
             try
                 if tech isa PSIP.StorageTechnology
-                    cap_lim = PSIP.get_capacity_limits_discharge(tech)
+                    cap_lim = PSIP.get_capacity_limits_discharge(tech, PSIP.NU)
                     println("  - $name (discharge: $(cap_lim.max) MW)")
                 else
-                    cap_lim = PSIP.get_capacity_limits(tech)
+                    cap_lim = PSIP.get_capacity_limits(tech, PSIP.NU)
                     println("  - $name (max: $(cap_lim.max) MW)")
                 end
             catch
@@ -1843,7 +1822,7 @@ function report_planning_results(
                         try
                             tech = PSIP.get_technology(PSIP.Technology, port, tech_name)
                             if !isnothing(tech)
-                                cap_cost = PSIP.get_capital_costs(tech)
+                                cap_cost = _capital_cost_curve(tech)
                                 # Capital cost is typically in $/kW, convert to total cost
                                 if !isnothing(cap_cost) && capacity > 0.01
                                     # LinearCurve provides a constant cost per MW
@@ -1906,7 +1885,7 @@ function report_planning_results(
                         try
                             tech = PSIP.get_technology(PSIP.Technology, port, tech_name)
                             if !isnothing(tech)
-                                cap_cost = PSIP.get_capital_costs(tech)
+                                cap_cost = _capital_cost_curve(tech)
                                 if !isnothing(cap_cost)
                                     # Capital cost in $/kW, capacity in MW
                                     try
@@ -2003,10 +1982,10 @@ function report_planning_results(
                     name = PSIP.get_name(tech)
                     try
                         if tech isa PSIP.StorageTechnology
-                            cap_lim = PSIP.get_capacity_limits_discharge(tech)
+                            cap_lim = PSIP.get_capacity_limits_discharge(tech, PSIP.NU)
                             println("  - $name (discharge: $(cap_lim.max) MW)")
                         else
-                            cap_lim = PSIP.get_capacity_limits(tech)
+                            cap_lim = PSIP.get_capacity_limits(tech, PSIP.NU)
                             println("  - $name (max: $(cap_lim.max) MW)")
                         end
                     catch
@@ -2096,10 +2075,10 @@ function report_planning_results(
                 name = PSIP.get_name(tech)
                 try
                     if tech isa PSIP.StorageTechnology
-                        cap_lim = PSIP.get_capacity_limits_discharge(tech)
+                        cap_lim = PSIP.get_capacity_limits_discharge(tech, PSIP.NU)
                         println("  - $name (discharge: $(cap_lim.max) MW)")
                     else
-                        cap_lim = PSIP.get_capacity_limits(tech)
+                        cap_lim = PSIP.get_capacity_limits(tech, PSIP.NU)
                         println("  - $name (max: $(cap_lim.max) MW)")
                     end
                 catch

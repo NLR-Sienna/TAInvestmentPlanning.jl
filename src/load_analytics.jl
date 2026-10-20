@@ -4,6 +4,15 @@
 # Extends PowerAnalytics.get_load_data() to apply load scaling factors.
 
 """
+Time series by component (`data`) on a shared time axis (`time`). Same layout as the
+`PowerData` that PowerAnalytics provided before its PowerSystems 6 update.
+"""
+struct PowerData
+    data::Dict{Symbol, DataFrames.DataFrame}
+    time::Union{StepRange{Dates.DateTime}, Vector{Dates.DateTime}}
+end
+
+"""
     get_load_data_with_multipliers(system::PSY.System; kwargs...) -> PowerData
 
 Retrieve load time series with proper multiplier application.
@@ -29,7 +38,6 @@ function get_load_data_with_multipliers(
     initial_time = get(kwargs, :initial_time, PSY.get_forecast_initial_timestamp(system))
 
     parameters = Dict{Symbol, DataFrames.DataFrame}()
-    PSY.set_units_base_system!(system, "SYSTEM_BASE")
 
     resolution = nothing
 
@@ -39,22 +47,14 @@ function get_load_data_with_multipliers(
     for load in loads
         load_name = PSY.get_name(load)
 
-        # Get time series keys for this load - prefer SingleTimeSeries (base data)
-        all_keys = PSY.get_time_series_keys(load)
-        ts_keys = filter(
-            key ->
-                PSY.get_time_series_type(key) == PSY.SingleTimeSeries &&
-                PSY.get_name(key) == "max_active_power",
-            all_keys,
-        )
-
-        if isempty(ts_keys)
+        # Use the SingleTimeSeries (base data) for this load
+        if !PSY.has_time_series(load, PSY.SingleTimeSeries, "max_active_power")
             @warn "Load $load_name has no SingleTimeSeries with name 'max_active_power'"
             continue
         end
 
-        key = first(ts_keys)
-        my_resolution = key.resolution
+        ts = PSY.get_time_series(PSY.SingleTimeSeries, load, "max_active_power"; start_time = initial_time)
+        my_resolution = PSY.get_resolution(ts)
 
         if isnothing(resolution)
             resolution = my_resolution
@@ -63,13 +63,8 @@ function get_load_data_with_multipliers(
                 throw(error("Load time series have mismatched resolutions"))
         end
 
-        # Get time series values (in per-unit on system base)
-        f = PSY.get_time_series_values(
-            PSY.SingleTimeSeries,
-            load,
-            "max_active_power";
-            start_time = initial_time,
-        )
+        # The series is a normalized profile; scale it to per-unit on system base
+        f = TimeSeries.values(PSY.get_data(ts)) .* PSY.get_max_active_power(load, u"SU")
 
         # Create a DataFrame with one column per load (matching PowerAnalytics structure)
         parameters[Symbol(load_name)] = DataFrames.DataFrame(Symbol(load_name) => f)
@@ -95,11 +90,11 @@ function get_load_data_with_multipliers(
         Dates.DateTime[]
     end
 
-    return PA.PowerData(parameters, time_range)
+    return PowerData(parameters, time_range)
 end
 
 """
-    sum_load_data(pd::PA.PowerData) -> DataFrame
+    sum_load_data(pd::PowerData) -> DataFrame
 
 Sum load data across all load components to get total system load.
 
@@ -109,7 +104,7 @@ producing a single-column DataFrame with total system load per timestep.
 Input:  PowerData where pd.data contains individual load DataFrames
 Output: DataFrame with single column "Total" containing total system load per hour (per-unit)
 """
-function sum_load_data(pd::PA.PowerData)::DataFrames.DataFrame
+function sum_load_data(pd::PowerData)::DataFrames.DataFrame
     result = DataFrames.DataFrame(Total = Float64[])
 
     if isempty(pd.data)

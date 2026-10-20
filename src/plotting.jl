@@ -17,7 +17,7 @@ Arguments:
   output_dir: Directory where the HTML plot is saved
 
 Returns:
-  PlotlyJS plot object
+  PlotlyLight plot object
 """
 function plot_generation_bar(uc_results; scenario::String="unknown", curtailment::Bool=false, bar::Bool=true,
                              output_dir::String="results/plots")
@@ -54,45 +54,47 @@ function plot_generation_bar(uc_results; scenario::String="unknown", curtailment
 
         if bar
             # Create bar chart
-            trace = PlotlyJS.bar(
-                x = ["Hydro", "Wind", "Diesel"],
-                y = [hydro_total, wind_total, diesel_total],
-                marker_color = ["#1f77b4", "#2ca02c", "#d62728"],
-                text = [@sprintf("%.0f MWh\n(%.1f%%)", hydro_total, 100*hydro_total/max(total, 1)),
-                        @sprintf("%.0f MWh\n(%.1f%%)", wind_total, 100*wind_total/max(total, 1)),
-                        @sprintf("%.0f MWh\n(%.1f%%)", diesel_total, 100*diesel_total/max(total, 1))],
-                textposition = "outside",
-                hovertemplate = "<b>%{x}</b><br>Energy: %{y:.0f} MWh<extra></extra>",
+            trace = Dict{String, Any}(
+                "type" => "bar",
+                "x" => ["Hydro", "Wind", "Diesel"],
+                "y" => [hydro_total, wind_total, diesel_total],
+                "marker" => Dict("color" => ["#1f77b4", "#2ca02c", "#d62728"]),
+                "text" => [@sprintf("%.0f MWh\n(%.1f%%)", hydro_total, 100*hydro_total/max(total, 1)),
+                           @sprintf("%.0f MWh\n(%.1f%%)", wind_total, 100*wind_total/max(total, 1)),
+                           @sprintf("%.0f MWh\n(%.1f%%)", diesel_total, 100*diesel_total/max(total, 1))],
+                "textposition" => "outside",
+                "hovertemplate" => "<b>%{x}</b><br>Energy: %{y:.0f} MWh<extra></extra>",
             )
 
-            layout = Layout(
-                title = "Annual Generation by Fuel Type ($scenario)",
-                xaxis_title = "Resource",
-                yaxis_title = "Energy (MWh)",
-                height = 500,
-                showlegend = false,
-                hovermode = "closest",
+            layout = Dict{String, Any}(
+                "title" => "Annual Generation by Fuel Type ($scenario)",
+                "xaxis" => Dict("title" => "Resource"),
+                "yaxis" => Dict("title" => "Energy (MWh)"),
+                "height" => 500,
+                "showlegend" => false,
+                "hovermode" => "closest",
             )
         else
             # Alternative format (currently same as bar)
-            trace = PlotlyJS.bar(
-                x = ["Hydro", "Wind", "Diesel"],
-                y = [hydro_total, wind_total, diesel_total],
-                marker_color = ["#1f77b4", "#2ca02c", "#d62728"],
+            trace = Dict{String, Any}(
+                "type" => "bar",
+                "x" => ["Hydro", "Wind", "Diesel"],
+                "y" => [hydro_total, wind_total, diesel_total],
+                "marker" => Dict("color" => ["#1f77b4", "#2ca02c", "#d62728"]),
             )
 
-            layout = Layout(
-                title = "Annual Generation by Fuel Type ($scenario)",
-                yaxis_title = "Energy (MWh)",
-                height = 500,
+            layout = Dict{String, Any}(
+                "title" => "Annual Generation by Fuel Type ($scenario)",
+                "yaxis" => Dict("title" => "Energy (MWh)"),
+                "height" => 500,
             )
         end
 
-        p = PlotlyJS.plot([trace], layout)
+        p = PlotlyLight.Plot([trace], layout)
         mkpath(output_dir)
-        PlotlyJS.savefig(p, joinpath(output_dir, "generation_resource_$(scenario).html"))
+        PlotlyLight.save(p, joinpath(output_dir, "generation_resource_$(scenario).html"))
 
-        return PlotlyJS.plot([trace], layout)
+        return p
     catch e
         @warn "Error generating fuel plot: $e"
         return nothing
@@ -110,13 +112,13 @@ Arguments:
   scenario: Scenario name for plot title
 
 Returns:
-  PlotlyJS plot object
+  PlotlyLight plot object
 """
 function plot_reserve_timeseries(uc_results; scenario::String="unknown")
     try
         # Read reserve provision by generator (contributions to reserve)
         reserve_provision = unstack(
-            PSI.read_realized_variable(uc_results, PSI.ActivePowerReserveVariable, PSY.ConstantReserve{ReserveUp}, case_operating_reserve_name()),
+            read_reserve_provision(uc_results, case_operating_reserve_name()),
             :DateTime,
             :name,
             :value
@@ -124,23 +126,21 @@ function plot_reserve_timeseries(uc_results; scenario::String="unknown")
 
         # Read unmet reserve (slack - shortage when positive)
         unmet_reserve = unstack(
-            PSI.read_realized_variable(uc_results, PSI.ReserveRequirementSlack, PSY.ConstantReserve{ReserveUp}, case_operating_reserve_name()),
+            read_reserve_slack(uc_results, case_operating_reserve_name()),
             :DateTime,
             :name,
             :value
         )
-        DataFrames.rename!(unmet_reserve, Symbol("ReserveRequirementSlack__ConstantReserve__ReserveUp__" * case_operating_reserve_name()) => :Unmet_Reserve)
+        DataFrames.rename!(unmet_reserve, case_operating_reserve_name() => :Unmet_Reserve)
 
 
-        p = PG.plot_dataframe(unmet_reserve,
-            seriescolor = [:red]);
-        p = PG.plot_dataframe!(p, reserve_provision,
+        p = PG.plot_dataframe_plotly(unmet_reserve,
+            seriescolor = ["red"]);
+        p = PG.plot_dataframe_plotly!(p, reserve_provision,
             title = "Operating Reserve Provision by Generator ($scenario)",
-            xlabel = "Time",
-            ylabel = "Reserve (MW)",
+            y_label = "Reserve (MW)",
             stack = true,
-            legend = :topright,
-            display = false);
+            set_display = false);
 
 
         return p;
@@ -195,14 +195,14 @@ function plot_pcm_results(pcm_results::Dict; output_dir::String="results/plots")
         # Create fuel plot
         @info "  Creating fuel/generation plots..."
         fuel_plot = try
-            PG.plot_fuel(uc_results, title="Fuel Mix - $(String(scenario))", curtailment=false)
+            PG.plot_fuel_plotly(uc_results, title="Fuel Mix - $(String(scenario))", curtailment=false)
         catch e
             @warn "Failed to create fuel plot: $e"
             nothing
         end
 
         if !isnothing(fuel_plot)
-            fuel_plot_path = joinpath(output_dir, "fuel_generation_$(scenario).png")
+            fuel_plot_path = joinpath(output_dir, "fuel_generation_$(scenario).html")
             try
                 PG.save_plot(fuel_plot, fuel_plot_path)
                 @info "  ✓ Fuel plot saved: $fuel_plot_path"
@@ -214,14 +214,14 @@ function plot_pcm_results(pcm_results::Dict; output_dir::String="results/plots")
         # PowerGraphics fuel plot (alternative rendering)
         @info "  Creating PowerGraphics fuel plot..."
         pg_fuel_plot = try
-            PG.plot_fuel(uc_results, title="Fuel Mix - $(String(scenario))", curtailment=false)
+            PG.plot_fuel_plotly(uc_results, title="Fuel Mix - $(String(scenario))", curtailment=false)
         catch e
             @warn "PowerGraphics fuel plot not available (may be due to wind model): $e"
             nothing
         end
 
         if !isnothing(pg_fuel_plot)
-            pg_fuel_plot_path = joinpath(output_dir, "pg_fuel_$(scenario).png")
+            pg_fuel_plot_path = joinpath(output_dir, "pg_fuel_$(scenario).html")
             try
                 PG.save_plot(pg_fuel_plot, pg_fuel_plot_path)
                 @info "  ✓ PowerGraphics fuel plot saved: $pg_fuel_plot_path"
@@ -233,14 +233,14 @@ function plot_pcm_results(pcm_results::Dict; output_dir::String="results/plots")
         # PowerGraphics generation plot
         @info "  Creating generation plots..."
         gen_plot = try
-            PG.plot_fuel(uc_results, title=String(scenario), curtailment=false, bar=true)
+            PG.plot_fuel_plotly(uc_results, title=String(scenario), curtailment=false, bar=true)
         catch e
             @warn "Generation plot not available: $e"
             nothing
         end
 
         if !isnothing(gen_plot)
-            gen_plot_path = joinpath(output_dir, "generation_$(scenario).png")
+            gen_plot_path = joinpath(output_dir, "generation_$(scenario).html")
             try
                 PG.save_plot(gen_plot, gen_plot_path)
                 @info "  ✓ Generation plot saved: $gen_plot_path"
@@ -252,14 +252,14 @@ function plot_pcm_results(pcm_results::Dict; output_dir::String="results/plots")
         # PowerGraphics demand plot
         @info "  Creating demand/load plots..."
         demand_plot = try
-            PG.plot_demand(uc_results)
+            PG.plot_demand_plotly(uc_results)
         catch e
             @warn "Demand plot not available: $e"
             nothing
         end
 
         if !isnothing(demand_plot)
-            demand_plot_path = joinpath(output_dir, "demand_$(scenario).png")
+            demand_plot_path = joinpath(output_dir, "demand_$(scenario).html")
             try
                 PG.save_plot(demand_plot, demand_plot_path)
                 @info "  ✓ Demand plot saved: $demand_plot_path"

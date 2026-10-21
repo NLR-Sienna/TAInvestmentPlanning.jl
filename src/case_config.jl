@@ -3,7 +3,8 @@
 # Sections:
 #   [case]               name, title
 #   [financial]          discount_rate, base_year, inflation_rate, interest_rate, capital_recovery_period,
-#                        debt_fraction, debt_rate, return_on_equity, tax_rate
+#                        debt_fraction, debt_rate, return_on_equity, tax_rate, optional capital_within_horizon
+#                        (default true: builds pay only the capital payments up to the horizon end)
 #   [penalties]          unserved_energy_per_mwh, reserve_margin_per_mw_yr
 #   [tier2_fuel]         fuel_limit_gal_per_yr, penalty_per_gal, default_heat_rate_mbtu_per_mwh
 #                        (system-wide cap on fuel burned by all thermal units in the CEM)
@@ -89,6 +90,7 @@ function load_planning_settings(path::AbstractString)
         discount_rate = cfg["financial"]["discount_rate"],
         base_year = cfg["financial"]["base_year"],
         financial = _nt(cfg["financial"]),
+        capital_within_horizon = get(cfg["financial"], "capital_within_horizon", true),
         unserved_energy_per_mwh = cfg["penalties"]["unserved_energy_per_mwh"],
         reserve_margin_per_mw_yr = cfg["penalties"]["reserve_margin_per_mw_yr"],
         tier2_fuel_limit_gal = cfg["tier2_fuel"]["fuel_limit_gal_per_yr"],

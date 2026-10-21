@@ -1227,6 +1227,8 @@ function solve_planning(
             _apply_tier2_hours_limit!(model, portfolio)
         end
 
+        settings().capital_within_horizon && _limit_capital_to_horizon!(model, portfolio)
+
         # Write model after solve to include all constraints
         # PSI2.write_to_file(model.internal.container.JuMPmodel, joinpath(results_dir, "model.lp"))
         #@info "lp file written to: $(joinpath(results_dir, "model.lp"))"
@@ -1579,6 +1581,36 @@ function _plot_capacity_by_type(
     PlotlyLight.save(plot, output_path)
     display(plot)
     return plot
+end
+
+# Charge builds only for the annual capital payments inside the planning horizon. PowerSystemsInvestments
+# charges the present value of all capital_recovery_period payments, so a build in the last interval
+# paid its full capital cost for one modeled year. Each build variable's objective coefficient is scaled
+# by annuity(years from its interval's start to the horizon end) / annuity(capital_recovery_period).
+function _limit_capital_to_horizon!(model::PSI2.InvestmentModel, portfolio::PSIP.Portfolio)
+    jm = model.internal.container.JuMPmodel
+    intervals = _PORTFOLIO_INTERVAL_DATA[objectid(portfolio)].intervals
+    r = settings().discount_rate
+    recovery = settings().financial.capital_recovery_period
+    annuity(n) = (1 - (1 + r)^(-n)) / r
+    horizon_end = Dates.year(intervals[end][2])
+    factors = [annuity(min(recovery, horizon_end - Dates.year(s) + 1)) / annuity(recovery) for (s, _) in intervals]
+
+    objective = JuMP.objective_function(jm)
+    n_scaled = 0
+    for v in JuMP.all_variables(jm)
+        vn = name(v)
+        contains(vn, "Build") || continue
+        m = match(r"_\{([^{}]+), (\d+)\}$", vn)
+        isnothing(m) && continue
+        c = JuMP.coefficient(objective, v)
+        c == 0.0 && continue
+        JuMP.set_objective_coefficient(jm, v, c * factors[parse(Int, m.captures[2])])
+        n_scaled += 1
+    end
+    @info "Capital costs limited to payments within the horizon (through $horizon_end): interval factors " *
+          "$(round.(factors, digits=3)), $n_scaled build variables"
+    return
 end
 
 # Planned additions from case.toml as exogenous builds: capacity in the addition year, nothing otherwise

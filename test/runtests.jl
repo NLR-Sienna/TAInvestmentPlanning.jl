@@ -46,6 +46,7 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
         @test isnothing(IP.technology_kind("Not_A_Technology"))
         @test IP.default_pcm_sim_name() == "tiny_annual"
         @test s.capacity_credit == (method = "net_load", top_hours = 100)  # defaults
+        @test s.capital_within_horizon
         @test IP.retired_capacity_mw("Wind_1", 2025) == 0.0
         @test IP.retired_capacity_mw("Wind_1", 2026) == 1.0
         @test IP.retired_capacity_mw("Diesel_1", 2030) == 0.0

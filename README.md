@@ -60,6 +60,7 @@ Scenario inputs are JSON files or JSON strings:
 | `--procurement-timelines` | `{"Tech_Name": [first_year, last_year]}` | case default timelines |
 | `--exogenous-builds` | `{"Tech_Name": {"2030": 4.0}}` (0 = do not build) | none |
 | `--diesel-price` | \$/gal | case default |
+| `--solver-time-limit` | CEM solver time limit, seconds | `[solver] time_limit_s` |
 
 ## Case directory
 

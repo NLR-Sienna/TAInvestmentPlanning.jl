@@ -167,6 +167,10 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
         @test isnothing(args["diesel-price"])
         @test IP._diesel_price(args) == 4.0
         @test IP._diesel_price(parse_cmdline(["cem", "--diesel-price=6.5"])) == 6.5
+        @test isnothing(args["solver-time-limit"])
+        @test IP._solver_time_limit(args) == 60.0  # tiny case [solver] time_limit_s
+        @test IP._solver_time_limit(parse_cmdline(["cem", "--solver-time-limit=3600"])) == 3600.0
+        @test IP._solver_time_limit(Dict{String, Any}()) == 60.0  # hand-built REPL args without the key
         @test args["enable-nodal-slack"] && !parse_cmdline(["--disable-nodal-slack"])["enable-nodal-slack"]
 
         # Without --scenario: the case default scenario, else the only scenario in the input

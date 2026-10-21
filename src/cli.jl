@@ -62,6 +62,10 @@ function _arg_settings()
             default = 0.05
             arg_type = Float64
 
+        "--solver-time-limit"
+            help = "CEM solver time limit in seconds (default: [solver] time_limit_s in case.toml)"
+            arg_type = Float64
+
         "--copper-plate"
             help = "PCM: Use CopperPlate model (faster, no transmission) instead of NFAPowerModel"
             action = :store_true
@@ -139,6 +143,7 @@ Parse workflow arguments. In the REPL, build the argument Dict for a workflow wi
 parse_cmdline(args::AbstractVector{<:AbstractString} = ARGS) = parse_args(collect(String, args), _arg_settings())
 
 _diesel_price(args) = something(get(args, "diesel-price", nothing), case_default_diesel_price())
+_solver_time_limit(args) = Float64(something(get(args, "solver-time-limit", nothing), settings().time_limit_s))
 
 function _apply_slack_args!(args)
     set_slack_options!(;
@@ -361,7 +366,8 @@ function run_cem_workflow(args::Dict{String, Any})
     results_dir = joinpath("results", "planning", scenario_name)
     exogenous_builds = parse_exogenous_builds(args["exogenous-builds"])
     res = solve_planning(port; results_dir = results_dir, day_start = args["day-start"], day_end = args["day-end"],
-                         mip_gap = args["mip-gap"], exogenous_builds = exogenous_builds,
+                         mip_gap = args["mip-gap"], solver_time_limit = _solver_time_limit(args),
+                         exogenous_builds = exogenous_builds,
                          fuel_cap = !args["disable-fuel-cap"],
                          tier2_hours = !get(args, "disable-tier2-hours", false), copper_plate = !args["nodal-cem"])
 
@@ -406,7 +412,8 @@ function run_battery_comparison_workflow(args::Dict{String, Any})
     portfolio = build_planning_portfolio(arrivals; verbose = true, diesel_price = diesel_price)
     cem_results_obj = solve_planning(portfolio;
                                      results_dir = joinpath("results", "planning", scenario_name),
-                                     day_start = args["day-start"], day_end = args["day-end"], mip_gap = mip_gap)
+                                     day_start = args["day-start"], day_end = args["day-end"], mip_gap = mip_gap,
+                                     solver_time_limit = _solver_time_limit(args))
     inv_results = _extract_investment_results(cem_results_obj)
     println("Investment results: $inv_results")
     println("\nReporting investment results...")
@@ -662,6 +669,7 @@ function run_validation_workflow(args::Dict{String, Any})
         cem_results_obj = solve_planning(portfolio;
                                          results_dir = planning_dir,
                                          day_start = args["day-start"], day_end = args["day-end"], mip_gap = mip_gap,
+                                         solver_time_limit = _solver_time_limit(args),
                                          exogenous_builds = parse_exogenous_builds(args["exogenous-builds"]),
                                          fuel_cap = !args["disable-fuel-cap"],
                          tier2_hours = !get(args, "disable-tier2-hours", false), copper_plate = !args["nodal-cem"])
@@ -771,7 +779,8 @@ function run_uncertainty_workflow(args::Dict{String, Any})
         portfolio = build_planning_portfolio(arrivals; verbose = false, diesel_price = _diesel_price(args))
         results = solve_planning(portfolio;
                                 results_dir = joinpath("results", "planning", string(scenario_name)),
-                                day_start = args["day-start"], day_end = args["day-end"], mip_gap = mip_gap)
+                                day_start = args["day-start"], day_end = args["day-end"], mip_gap = mip_gap,
+                                solver_time_limit = _solver_time_limit(args))
         all_results[scenario_name] = _extract_investment_results(results)
 
         # Extract investment timing information

@@ -42,9 +42,8 @@ PowerOperationsModels = {url = "https://github.com/Sienna-Platform/PowerOperatio
 PowerNetworkMatrices = {url = "https://github.com/Sienna-Platform/PowerNetworkMatrices.jl.git", rev = "psy6"}
 # PowerSystemsInvestments shares its UUID with the registered HybridSystemsSimulations package, so it
 # must always come from a source; without it Pkg resolves the UUID to HybridSystemsSimulations.
-# Local checkouts of the cb/psy6 branches until they are pushed.
-PowerSystemsInvestments = {path = "../PowerSystemsInvestments.jl"}
-PowerSystemsInvestmentsPortfolios = {path = "../PowerSystemsInvestmentsPortfolios.jl"}
+PowerSystemsInvestments = {url = "https://github.com/Sienna-Platform/PowerSystemsInvestments.jl.git", rev = "cb/psy6"}
+PowerSystemsInvestmentsPortfolios = {url = "https://github.com/Sienna-Platform/PowerSystemsInvestmentsPortfolios.jl.git", rev = "cb/psy6"}
 
 [compat]
 ArgParse = "1.2"

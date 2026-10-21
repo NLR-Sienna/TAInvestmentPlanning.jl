@@ -20,8 +20,8 @@ unregistered branches, declared in `[sources]` in `Project.toml`:
 | `PowerSimulations` | `psy6` |
 | `PowerAnalytics` | `jd/enumx` |
 | `PowerGraphics` | `psy6` |
-| `PowerSystemsInvestments` | `cb/psy6`, local checkout in `../PowerSystemsInvestments.jl` |
-| `PowerSystemsInvestmentsPortfolios` | `cb/psy6`, local checkout in `../PowerSystemsInvestmentsPortfolios.jl` |
+| `PowerSystemsInvestments` | `cb/psy6` |
+| `PowerSystemsInvestmentsPortfolios` | `cb/psy6` |
 
 `InfrastructureOptimizationModels`, `PowerOperationsModels`, and `PowerNetworkMatrices` are only
 indirect dependencies; they are listed in `[deps]` so that `[sources]` can pin their branches.

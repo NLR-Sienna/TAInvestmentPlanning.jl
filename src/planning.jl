@@ -610,17 +610,6 @@ function _attach_time_series_to_portfolio!(
                                         rep_day_stamps, wind_cf_hourly, month_num, year_str)
             end
 
-            # Existing wind units, scaled by the case availability multiplier (e.g., partial retirements)
-            base_system = PSIP.get_base_system(port)
-            if !isnothing(base_system)
-                for existing_wind in PSY.get_components(w -> PSY.get_prime_mover_type(w) == PSY.PrimeMovers.WT, PSY.RenewableDispatch, base_system)
-                    multiplier = case_existing_availability_multiplier(PSY.get_name(existing_wind), rep_year)
-                    wind_cf_scaled = wind_cf_hourly .* multiplier
-                    _add_single_time_series_to_device!(base_system, existing_wind, "max_active_power",
-                                                       rep_day_stamps, wind_cf_scaled, month_num, year_str, PSY.get_max_active_power)
-                end
-            end
-
             # Demand technology
             demand_tech = PSIP.get_technology(PSIP.DemandRequirement{PowerSystems.PowerLoad}, port, settings().base_demand.name)
             if !isnothing(demand_tech)
@@ -668,21 +657,13 @@ function _attach_time_series_to_portfolio!(
         end
     end
 
-    # Planned additions: capacity in their addition year only, zero otherwise
+    # Planned additions: full-horizon capacity factor. Their builds are fixed in solve_planning
+    # (_planned_addition_builds) rather than through a planned_addition time series.
     min_year = first(rep_years)
     max_year = last(rep_years)
     for addition in settings().planned_additions
         exo_wind = PSIP.get_technology(PSIP.SupplyTechnology{PowerSystems.RenewableDispatch}, port, addition.name)
         isnothing(exo_wind) && continue
-
-        planned_addition_hourly = Float64[]
-        for year in min_year:max_year
-            capacity_value = year == addition.year ? addition.capacity_mw : 0.0
-            hours_in_year = (Dates.isleapyear(year) ? 366 : 365) * 24
-            append!(planned_addition_hourly, fill(capacity_value, hours_in_year))
-        end
-        ta = TimeSeries.TimeArray(full_horizon_timestamps, planned_addition_hourly)
-        PSIP.add_time_series!(port, exo_wind, PowerSystems.SingleTimeSeries("planned_addition", ta))
 
         # Full-horizon capacity factor (skipped if the representative-period loop already added it)
         try
@@ -809,8 +790,6 @@ function build_planning_template(
     # Portfolio technologies are investment-capable; base system devices dispatch-only
 
     # Candidate Renewables: investment + dispatch with capacity factors
-    # TEMPORARILY DISABLED: Solar_City_new, Solar_Nymans_new (for wind debugging)
-    # Note: Wind_Pillar_Repower is exogenous (handled via planned_addition TS), NOT a candidate
     all_candidate_renewables = [w.name for w in settings().candidates.wind if w.in_template]
 
     # Filter renewable candidates by procurement availability
@@ -818,6 +797,9 @@ function build_planning_template(
         avail_from, avail_until = get(procurement_timelines, tech_name, (2020, 9999))
         any(avail_from <= year <= avail_until for year in rep_years)
     end
+
+    # Planned additions are built exactly once, in their year (fixed in solve_planning)
+    append!(candidate_renewables, [a.name for a in settings().planned_additions])
 
     if !isempty(candidate_renewables)
         PSI2.set_technology_model!(template, candidate_renewables,
@@ -1019,7 +1001,7 @@ function _add_reserve_margin_slack!(model::PSI2.InvestmentModel, portfolio)
     n_unmatched = 0
     for var in JuMP.all_variables(jm)
         var_name = name(var)
-        if contains(var_name, "BuildCapacity") || contains(var_name, "BuildPowerCapacity")
+        if (contains(var_name, "BuildCapacity") || contains(var_name, "BuildPowerCapacity")) && !JuMP.is_binary(var)
             credit = _credit_for_build_variable(var_name, credits)
             if isnothing(credit)
                 n_unmatched += 1
@@ -1121,9 +1103,13 @@ function solve_planning(
             @warn "Failed to apply procurement timeline constraints: $e"
         end
 
-        if !isnothing(exogenous_builds)
-            _fix_exogenous_builds!(model, portfolio, exogenous_builds)
+        # Planned additions are built in their year; user exogenous builds override them per technology
+        builds = merge(_planned_addition_builds(), something(exogenous_builds, Dict{String, Dict{Int, Float64}}()))
+        if !isempty(builds)
+            _fix_exogenous_builds!(model, portfolio, builds)
         end
+
+        _apply_existing_availability!(model, portfolio)
 
         if fuel_cap
             _apply_diesel_fuel_cap!(model, portfolio)
@@ -1162,6 +1148,7 @@ function _enforce_procurement_timelines!(
     container = model.internal.container
 
     num_constraints_added = 0
+    planned_names = Set(a.name for a in settings().planned_additions)
 
     # Try to access BuildCapacity variables through PSI2's standard access pattern
     try
@@ -1198,6 +1185,8 @@ function _enforce_procurement_timelines!(
                         period_year = rep_years[period_pos]
 
                         for tech_name in tech_names
+                            # Planned additions are fixed to their year; timelines do not apply
+                            string(tech_name) in planned_names && continue
                             # Check if technology is available in this period
                             avail_from, avail_until = get(procurement_timelines, string(tech_name), (2020, 9999))
 
@@ -1478,6 +1467,48 @@ function _plot_capacity_by_type(
     return plot
 end
 
+# Planned additions from case.toml as exogenous builds: capacity in the addition year, nothing otherwise
+_planned_addition_builds() =
+    Dict{String, Dict{Int, Float64}}(a.name => Dict(a.year => Float64(a.capacity_mw)) for a in settings().planned_additions)
+
+# Scale the CEM dispatch limits of existing base-system units by case_existing_availability_multiplier
+# (e.g. partial retirements) for each investment interval's representative year: the dispatch variable
+# upper bound (rated MW) and, where present, the capacity-factor limit constraint.
+function _apply_existing_availability!(model::PSI2.InvestmentModel, portfolio::PSIP.Portfolio)
+    container = model.internal.container
+    rep_years = _PORTFOLIO_INTERVAL_DATA[objectid(portfolio)].rep_years
+    existing = Set(PSY.get_name.(PSY.get_components(PSY.Generator, PSIP.get_base_system(portfolio))))
+    multiplier(name, t, n_steps) = case_existing_availability_multiplier(name, rep_years[div(t - 1, n_steps ÷ length(rep_years)) + 1])
+
+    n_scaled = 0
+    for (store, kind) in ((PSI2.get_variables(container), "ActivePowerVariable"),
+                          (PSI2.get_constraints(container), "ActivePowerLimitsConstraint"))
+        for (key, arr) in store
+            contains(string(key), kind) || continue
+            arr isa JuMP.Containers.DenseAxisArray || continue
+            names_, steps = axes(arr)
+            for name in names_
+                name in existing || continue
+                for t in steps
+                    m = multiplier(name, t, length(steps))
+                    m == 1.0 && continue
+                    x = arr[name, t]
+                    if x isa JuMP.VariableRef && JuMP.has_upper_bound(x)
+                        JuMP.set_upper_bound(x, m * JuMP.upper_bound(x))
+                    elseif x isa JuMP.ConstraintRef
+                        JuMP.set_normalized_rhs(x, m * JuMP.normalized_rhs(x))
+                    else
+                        continue
+                    end
+                    n_scaled += 1
+                end
+            end
+        end
+    end
+    n_scaled > 0 && @info "Scaled $n_scaled existing-unit dispatch limits by case availability multipliers"
+    return
+end
+
 function _investment_period_for_year(intervals::Vector{NTuple{2, Date}}, year::Int)::Union{Int, Nothing}
     return findfirst(iv -> Dates.year(iv[1]) <= year <= Dates.year(iv[2]), intervals)
 end
@@ -1528,7 +1559,8 @@ function _fix_exogenous_builds!(
         if tech in thermal && target > 1e-6 && abs(target - ratings[tech]) > 1e-6
             error("Exogenous build for $tech must be 0 or one unit ($(ratings[tech]) MW) per interval; got $target MW")
         end
-        JuMP.fix(v, target; force=true)
+        # Binary investments also have a 0/1 build decision (BuildCapacity_binary) next to the MW build
+        JuMP.fix(v, JuMP.is_binary(v) ? (target > 1e-6 ? 1.0 : 0.0) : target; force=true)
         n_fixed += 1
     end
 

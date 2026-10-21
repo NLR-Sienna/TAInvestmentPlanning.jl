@@ -16,7 +16,7 @@
 #   [scenarios]          arrivals (JSON of load arrival scenarios), default_scenario (name in that file),
 #                        default_procurement_timelines (JSON); paths are relative to the case directory
 #   [pcm]                reference_wind_unit, default_bus
-#   [[planned_additions]] name, kind, bus, capacity_mw, year, id
+#   [[planned_additions]] name, kind, bus, capacity_mw, year, id, optional pcm_bus; built exactly in `year`
 #   [candidates]         diesel_heat_rate_mbtu_per_mwh, diesel_start_up_cost, diesel_shut_down_cost,
 #                        battery_efficiency, battery_lifetime_years, battery_power_cost_share,
 #                        and [[candidates.battery]], [[candidates.diesel]], [[candidates.wind]] tables
@@ -57,7 +57,7 @@ function build_technology_catalog(candidates, planned_additions)
         catalog[w.name] = (kind = "Wind", pcm_bus = w.pcm_bus, capacity_mw = w.capacity_mw)
     end
     for a in planned_additions
-        catalog[a.name] = (kind = titlecase(a.kind), pcm_bus = nothing, capacity_mw = a.capacity_mw)
+        catalog[a.name] = (kind = titlecase(a.kind), pcm_bus = get(a, :pcm_bus, nothing), capacity_mw = a.capacity_mw)
     end
     return catalog
 end

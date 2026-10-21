@@ -208,6 +208,12 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
                     @info "Updated tiny-case references in $REFERENCE_DIR"
                 end
 
+                # A forced build of a binary candidate fixes both its MW and its 0/1 build decision
+                run_cem_workflow(parse_cmdline(["cem", "--day-start=1", "--day-end=2",
+                    "--exogenous-builds={\"Wind_new_1\": {\"2026\": 1.5}}"]))
+                forced = JSON.parsefile(joinpath("results", "planning", "growth", "summary.json"))
+                @test forced["investments_mw"]["Wind_new_1"] ≈ 1.5
+
                 ref_cem = JSON.parsefile(joinpath(REFERENCE_DIR, "tiny_cem.json"))
                 ref_pcm = JSON.parsefile(joinpath(REFERENCE_DIR, "tiny_pcm.json"))
                 @test cem["investments_mw"] == ref_cem["investments_mw"]

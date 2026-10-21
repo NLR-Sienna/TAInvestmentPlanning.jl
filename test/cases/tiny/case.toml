@@ -52,6 +52,11 @@ default_procurement_timelines = "scenarios/default_procurement_timelines.json"
 reference_wind_unit = "Wind_1"
 default_bus = "Main"
 
+[[planned_retirements]]
+unit = "Wind_1"
+capacity_mw = 1.0
+year = 2026
+
 [candidates]
 diesel_heat_rate_mbtu_per_mwh = 9.5
 diesel_start_up_cost = 100.0

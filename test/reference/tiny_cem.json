@@ -2,19 +2,19 @@
   "investments_mw": {
     "Wind_new_1": 0.0,
     "Diesel_Recip_2MW_Main": 0.0,
-    "Battery_1.0MW_4.0MWh": 0.8333333333333314
+    "Battery_1.0MW_4.0MWh": 1.0
   },
-  "objective": 2.687166062355156e6,
+  "objective": 3.3525412314166776e6,
   "tier2_gallons_per_interval": [
-    2.362460305123863e6,
-    4.9015907399064675e6
+    2.3624603051238623e6,
+    5.214393826604318e6
   ],
   "tier2_hours_excess_mwh_per_interval": [
-    31401.952210709274,
-    66441.95221070934
+    31401.95221070929,
+    70758.63480713953
   ],
   "tier2_slack_gallons_per_interval": [
     0.0,
-    901590.7399064705
+    1.2143938266043148e6
   ]
 }

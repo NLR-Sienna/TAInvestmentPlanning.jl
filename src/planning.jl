@@ -317,6 +317,10 @@ function build_planning_portfolio(
     # Build the underlying PowerSystems.System
     sys, _ = build_case_system(; diesel_price=diesel_price, verbose=false)
     adjust_planning_system!(sys, rep_years; verbose=verbose)
+    for r in settings().planned_retirements
+        isnothing(PSY.get_component(PSY.Generator, sys, r.unit)) &&
+            @warn "Planned retirement of $(r.unit): no such unit in the system"
+    end
 
 
     # Create Portfolio with the system and financial parameters
@@ -637,28 +641,9 @@ function _attach_time_series_to_portfolio!(
                 load_name = "Load_Arrival_$(arrival.year)_$(i)"
                 load_tech = PSIP.get_technology(PSIP.DemandRequirement{PowerSystems.PowerLoad}, port, load_name)
                 if !isnothing(load_tech)
-                    if arrival.year <= rep_year
-                        # Load has arrived: use its demand profile
-                        if arrival.conforming
-                            # Conforming: follows the system load shape, scaled so the base peak maps to arrival MW
-                            scaled_profile = load_profile_hourly .* (arrival.mw / case_base_peak_load_mw())
-                        else
-                            # Non-conforming: use custom profile if provided, else flat
-                            if !isnothing(arrival.custom_profile_path) && !isempty(arrival.custom_profile_path)
-                                # Custom normalized hourly profile (0-1) for these hours of the year, scaled by arrival.mw
-                                profile = get!(() -> load_custom_profile(arrival.custom_profile_path, 8760),
-                                               custom_profiles, arrival.custom_profile_path)
-                                scaled_profile = [profile[mod1((Dates.dayofyear(ts) - 1) * 24 + Dates.hour(ts) + 1, length(profile))]
-                                                  for ts in rep_day_stamps] .* arrival.mw
-                            else
-                                # Flat load profile (constant throughout all hours)
-                                scaled_profile = fill(arrival.mw, length(rep_day_stamps))
-                            end
-                        end
-                    else
-                        # Load hasn't arrived yet: zero demand
-                        scaled_profile = zeros(length(rep_day_stamps))
-                    end
+                    scaled_profile = arrival.year <= rep_year ?
+                        _arrival_profile(arrival, rep_day_stamps, load_profile_hourly, custom_profiles) :
+                        zeros(length(rep_day_stamps))  # not arrived yet
                     _add_single_time_series!(port, load_tech, "ops_peak_load",
                                            rep_day_stamps, scaled_profile, month_num, year_str)
                     # Also attach max_active_power for when the load is deployed as a PowerLoad component
@@ -690,6 +675,65 @@ function _attach_time_series_to_portfolio!(
             contains(string(e), "duplicate") || rethrow(e)
         end
     end
+end
+
+# Hourly MW of a load arrival for the given hours. Conforming arrivals follow the base load shape
+# (base_load_mw for the same hours) scaled so the base peak maps to the arrival MW; non-conforming
+# arrivals use their custom normalized profile by hour of the year, or are flat.
+function _arrival_profile(arrival, timestamps, base_load_mw, custom_profiles::Dict{String, Vector{Float64}})
+    arrival.conforming && return base_load_mw .* (arrival.mw / case_base_peak_load_mw())
+    if !isnothing(arrival.custom_profile_path) && !isempty(arrival.custom_profile_path)
+        profile = get!(() -> load_custom_profile(arrival.custom_profile_path, 8760), custom_profiles, arrival.custom_profile_path)
+        return [profile[mod1((Dates.dayofyear(ts) - 1) * 24 + Dates.hour(ts) + 1, length(profile))] for ts in timestamps] .* arrival.mw
+    end
+    return fill(Float64(arrival.mw), length(timestamps))
+end
+
+# System load (MW) of the base-system loads for the given consecutive hours
+function _base_load_mw(sys::PSY.System, timestamps)
+    loads = collect(PSY.get_components(PSY.PowerLoad, sys))
+    ratings = PSY.with_units_base(() -> PSY.get_max_active_power.(loads), sys, PSY.UnitSystem.NATURAL_UNITS)
+    return sum(_hourly_profile(load, timestamps) .* rating for (load, rating) in zip(loads, ratings))
+end
+
+"""
+    _net_load_capacity_credits(portfolio, year) -> Dict{String, Float64}
+
+Capacity credits of wind and solar resources from their mean capacity factor over the
+`[capacity_credit] top_hours` hours of highest net load in `year`: system load plus the load
+arrivals present that year, minus the output of the existing wind and solar units still in
+service. Existing units use their own profiles; candidate and planned wind use the reference wind
+unit's profile.
+"""
+function _net_load_capacity_credits(portfolio::PSIP.Portfolio, year::Int)
+    sys = PSIP.get_base_system(portfolio)
+    stamps = collect(DateTime(year, 1, 1) : Hour(1) : DateTime(year, 12, 31, 23))
+    base_load = _base_load_mw(sys, stamps)
+    load = copy(base_load)
+    custom_profiles = Dict{String, Vector{Float64}}()
+    for arrival in _PORTFOLIO_INTERVAL_DATA[objectid(portfolio)].arrivals
+        arrival.year <= year && (load .+= _arrival_profile(arrival, stamps, base_load, custom_profiles))
+    end
+
+    vre = [g for g in PSY.get_components(PSY.RenewableDispatch, sys)
+           if PSY.get_prime_mover_type(g) in (PSY.PrimeMovers.WT, PSY.PrimeMovers.PVe)]
+    profiles = Dict(PSY.get_name(g) => _hourly_profile(g, stamps) for g in vre)
+    in_service = PSY.with_units_base(sys, PSY.UnitSystem.NATURAL_UNITS) do
+        Dict(PSY.get_name(g) => _in_service_mw(g, year) for g in vre)
+    end
+    net_load = load .- sum((profiles[n] .* in_service[n] for n in keys(profiles)); init = zeros(length(stamps)))
+    top = partialsortperm(net_load, 1:min(settings().capacity_credit.top_hours, length(net_load)); rev = true)
+
+    credits = Dict{String, Float64}(n => mean(p[top]) for (n, p) in profiles)
+    reference = get(profiles, settings().pcm.reference_wind_unit, nothing)
+    if !isnothing(reference)
+        for tech in PSIP.get_technologies(PSIP.SupplyTechnology{PSY.RenewableDispatch}, portfolio)
+            PSIP.get_prime_mover_type(tech) == PSY.PrimeMovers.WT && (credits[PSIP.get_name(tech)] = mean(reference[top]))
+        end
+    end
+    @info "Capacity credits from the top $(length(top)) net-load hours of $year (peak net load $(round(net_load[top[1]], digits=1)) MW): " *
+          join(["$n=$(round(c, digits=3))" for (n, c) in sort(collect(credits))], ", ")
+    return credits
 end
 
 # Unscaled max_active_power values of a base-system component for the given consecutive hours
@@ -925,10 +969,14 @@ function _add_energy_balance_slack!(model::PSI2.InvestmentModel)
     # All slack penalties are now accumulated and set together
 end
 
-function _existing_capacity_mw(portfolio)
+# Rated MW of an existing unit still in service in `year` (all of it when year is nothing)
+_in_service_mw(gen, year) =
+    max(PSY.get_max_active_power(gen) - (isnothing(year) ? 0.0 : retired_capacity_mw(PSY.get_name(gen), year)), 0.0)
+
+function _existing_capacity_mw(portfolio; year = nothing)
     sys = PSIP.get_base_system(portfolio)
     isnothing(sys) && return 0.0
-    return sum(PSY.get_max_active_power(gen) for gen in PSY.get_components(PSY.Generator, sys); init=0.0)
+    return sum(_in_service_mw(gen, year) for gen in PSY.get_components(PSY.Generator, sys); init=0.0)
 end
 
 function _credit_for_build_variable(var_name::AbstractString, credits::Dict{String, Float64})
@@ -941,11 +989,11 @@ function _credit_for_build_variable(var_name::AbstractString, credits::Dict{Stri
     return isnothing(best) ? nothing : credits[best]
 end
 
-function _existing_effective_capacity_mw(portfolio, credits::Dict{String, Float64})
+function _existing_effective_capacity_mw(portfolio, credits::Dict{String, Float64}; year = nothing)
     sys = PSIP.get_base_system(portfolio)
     isnothing(sys) && return 0.0
     return sum(
-        PSY.get_max_active_power(gen) * get(credits, PSY.get_name(gen), 0.0)
+        _in_service_mw(gen, year) * get(credits, PSY.get_name(gen), 0.0)
         for gen in PSY.get_components(PSY.Generator, sys);
         init=0.0,
     )
@@ -1013,7 +1061,11 @@ function _add_reserve_margin_slack!(model::PSI2.InvestmentModel, portfolio)
 
     # Builds are per-period increments; storage uses BuildPowerCapacity rather than BuildCapacity
     credits = PSI2.get_capacity_credits(portfolio, PSIP.get_base_system(portfolio))
-    existing_capacity = _existing_effective_capacity_mw(portfolio, credits)
+    if settings().capacity_credit.method == "net_load"
+        merge!(credits, _net_load_capacity_credits(portfolio, final_rep_year))
+    end
+    jm.ext[:capacity_credits] = credits
+    existing_capacity = _existing_effective_capacity_mw(portfolio, credits; year = final_rep_year)
     build_cap_expr = JuMP.AffExpr(0.0)
     n_build_vars = 0
     n_unmatched = 0
@@ -1410,7 +1462,7 @@ function _capacity_type(name::AbstractString)
     return isnothing(kind) ? "Diesel" : kind
 end
 
-function _existing_capacity_by_type(port::PSIP.Portfolio)
+function _existing_capacity_by_type(port::PSIP.Portfolio, year = nothing)
     totals = Dict{String, Float64}()
     sys = PSIP.get_base_system(port)
     isnothing(sys) && return totals
@@ -1422,7 +1474,7 @@ function _existing_capacity_by_type(port::PSIP.Portfolio)
             pm == PSY.PrimeMovers.WT ? "Wind" :
             pm == PSY.PrimeMovers.PVe ? "Solar" :
             pm == PSY.PrimeMovers.BA ? "Battery" : "Other"
-        totals[t] = get(totals, t, 0.0) + PSY.get_max_active_power(gen)
+        totals[t] = get(totals, t, 0.0) + _in_service_mw(gen, year)
     end
     return totals
 end
@@ -1453,15 +1505,16 @@ function _plot_capacity_by_type(
 )
     n = length(intervals)
     labels = ["$(year(s))–$(year(e))" for (s, e) in intervals]
-    existing = _existing_capacity_by_type(port)
+    rep_years = _PORTFOLIO_INTERVAL_DATA[objectid(port)].rep_years
+    existing = [_existing_capacity_by_type(port, y) for y in rep_years]  # after planned retirements
     built = _built_capacity_by_type(res, n)
     types = sort(
-        collect(union(keys(existing), keys(built)));
+        collect(union(keys.(existing)..., keys(built)));
         by = t -> _capacity_plot_rank(get(CAPACITY_PLOT_PALETTE_CATEGORY, t, t)),
     )
     traces = Dict{String, Any}[]
     for t in types
-        base = get(existing, t, 0.0)
+        base = [get(existing[i], t, 0.0) for i in 1:n]
         cum = cumsum(get(built, t, zeros(n)))
         category = get(CAPACITY_PLOT_PALETTE_CATEGORY, t, t)
         palette_rgb = [p.RGB for p in PG.PALETTE if p.category == category]
@@ -1469,7 +1522,7 @@ function _plot_capacity_by_type(
             "type" => "bar",
             "name" => t,
             "x" => labels,
-            "y" => [base + c for c in cum],
+            "y" => base .+ cum,
             "marker" => Dict("color" => isempty(palette_rgb) ? "gray" : first(palette_rgb)),
         ))
     end
@@ -1489,14 +1542,23 @@ end
 _planned_addition_builds() =
     Dict{String, Dict{Int, Float64}}(a.name => Dict(a.year => Float64(a.capacity_mw)) for a in settings().planned_additions)
 
-# Scale the CEM dispatch limits of existing base-system units by case_existing_availability_multiplier
-# (e.g. partial retirements) for each investment interval's representative year: the dispatch variable
-# upper bound (rated MW) and, where present, the capacity-factor limit constraint.
+# Scale the CEM dispatch limits of existing base-system units for each investment interval's
+# representative year: by the share still in service after planned retirements and by
+# case_existing_availability_multiplier. Scales the dispatch variable upper bound (rated MW) and,
+# where present, the capacity-factor limit constraint.
 function _apply_existing_availability!(model::PSI2.InvestmentModel, portfolio::PSIP.Portfolio)
     container = model.internal.container
     rep_years = _PORTFOLIO_INTERVAL_DATA[objectid(portfolio)].rep_years
-    existing = Set(PSY.get_name.(PSY.get_components(PSY.Generator, PSIP.get_base_system(portfolio))))
-    multiplier(name, t, n_steps) = case_existing_availability_multiplier(name, rep_years[div(t - 1, n_steps ÷ length(rep_years)) + 1])
+    sys = PSIP.get_base_system(portfolio)
+    rated = PSY.with_units_base(sys, PSY.UnitSystem.NATURAL_UNITS) do
+        Dict(PSY.get_name(g) => PSY.get_max_active_power(g) for g in PSY.get_components(PSY.Generator, sys))
+    end
+    existing = Set(keys(rated))
+    function multiplier(name, t, n_steps)
+        year = rep_years[div(t - 1, n_steps ÷ length(rep_years)) + 1]
+        in_service = rated[name] > 0 ? max(rated[name] - retired_capacity_mw(name, year), 0.0) / rated[name] : 1.0
+        return in_service * case_existing_availability_multiplier(name, year)
+    end
 
     n_scaled = 0
     for (store, kind) in ((PSI2.get_variables(container), "ActivePowerVariable"),
@@ -1915,12 +1977,26 @@ function report_planning_results(
 
                 println("\nCapacity Summary:")
 
-                # Calculate existing capacity from base system
-                existing_capacity = _existing_capacity_mw(port)
+                # Existing capacity from the base system, after planned retirements by the final interval
+                final_year = isnothing(rep_years) ? nothing : rep_years[end]
+                existing_capacity = _existing_capacity_mw(port; year = final_year)
 
                 total_final_capacity = existing_capacity + total_capacity_built
 
-                println("  Existing generation capacity: $(round(existing_capacity, digits=2)) MW")
+                for r in settings().planned_retirements
+                    println("  Planned retirement: $(r.unit) -$(r.capacity_mw) MW from $(r.year)")
+                end
+                println("  Existing generation capacity$(isnothing(final_year) ? "" : " in $final_year"): $(round(existing_capacity, digits=2)) MW")
+                credit_jm = PSI2.get_jump_model(PSI2.get_optimization_container(res.model))
+                if haskey(credit_jm.ext, :capacity_credits)
+                    renewable = [n for n in keys(credit_jm.ext[:capacity_credits])
+                                 if technology_kind(n) == "Wind" || n == settings().pcm.reference_wind_unit ||
+                                    occursin(r"(?i)wind|solar|pv", n)]
+                    method = settings().capacity_credit.method == "net_load" ?
+                        "mean CF over the top $(settings().capacity_credit.top_hours) net-load hours" : "fixed by technology type"
+                    println("  Wind/solar capacity credits ($method): " *
+                            join(["$n $(round(credit_jm.ext[:capacity_credits][n], digits=3))" for n in sort(renewable)], ", "))
+                end
                 println("  New capacity being built: $(round(total_capacity_built, digits=2)) MW")
                 println("  Final total capacity: $(round(total_final_capacity, digits=2)) MW")
 

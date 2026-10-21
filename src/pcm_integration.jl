@@ -30,10 +30,12 @@ function build_post_investment_system(
     investment_results::Dict{String, Float64};
     arrivals::Vector{<:Any} = [],
     diesel_price::Float64 = case_default_diesel_price(),
+    year::Int = maximum(a.year for a in arrivals; init = settings().base_year),
 )
     # Start from the baseline system (operates in per-unit internally)
     sys, timestamps = build_case_system(; diesel_price=diesel_price, verbose=false)
     adjust_pcm_system!(sys, timestamps)
+    _apply_planned_retirements!(sys, year)
 
     # Add each built technology (system stays in per-unit)
     for (tech_name, capacity_mw) in investment_results
@@ -49,6 +51,28 @@ function build_post_investment_system(
         PSY.transform_single_time_series!(sys, Hour(48), Hour(24))
     end
 
+    return sys
+end
+
+# Remove the capacity of existing units retired by `year` ([[planned_retirements]] in case.toml):
+# partly retired units keep their remaining MW, fully retired units are made unavailable.
+function _apply_planned_retirements!(sys::PSY.System, year::Int)
+    for unit in unique(r.unit for r in settings().planned_retirements if r.year <= year)
+        gen = PSY.get_component(PSY.Generator, sys, unit)
+        if isnothing(gen)
+            @warn "Planned retirement of $unit: no such unit in the system"
+            continue
+        end
+        rated = PSY.with_units_base(() -> PSY.get_max_active_power(gen), sys, PSY.UnitSystem.NATURAL_UNITS)
+        retired = retired_capacity_mw(unit, year)
+        if retired >= rated - 1e-6
+            PSY.set_available!(gen, false)
+            @info "Planned retirement: $unit retired ($(rated) MW) by $year"
+        else
+            PSY.set_base_power!(gen, PSY.get_base_power(gen) * (rated - retired) / rated)
+            @info "Planned retirement: $unit $(rated) MW -> $(rated - retired) MW by $year"
+        end
+    end
     return sys
 end
 
@@ -292,7 +316,8 @@ function run_postoptimal_pcm(
 )
     # Build expanded system with new generators and load arrivals
     # (base system already has 13-year time series attached from build_case_system)
-    sys = build_post_investment_system(investment_results; arrivals=arrivals, diesel_price=diesel_price)
+    horizon_year = maximum(a.year for a in arrivals; init=settings().base_year)
+    sys = build_post_investment_system(investment_results; arrivals=arrivals, diesel_price=diesel_price, year=horizon_year)
 
     # Debug: verify load arrivals are in the system
     all_loads = collect(PSY.get_components(PSY.PowerLoad, sys))
@@ -330,7 +355,6 @@ function run_postoptimal_pcm(
     sim_folder = joinpath(results_dir, "sim_$(scenario)")
     mkpath(sim_folder)
 
-    horizon_year = maximum(a.year for a in arrivals; init=settings().base_year)
     sim = build_pcm_simulation(
         sys;
         results_dir = dirname(sim_folder),

@@ -45,6 +45,10 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
         @test IP.technology_kind("Diesel_Recip_2MW_Main") == "Diesel"
         @test isnothing(IP.technology_kind("Not_A_Technology"))
         @test IP.default_pcm_sim_name() == "tiny_annual"
+        @test s.capacity_credit == (method = "net_load", top_hours = 100)  # defaults
+        @test IP.retired_capacity_mw("Wind_1", 2025) == 0.0
+        @test IP.retired_capacity_mw("Wind_1", 2026) == 1.0
+        @test IP.retired_capacity_mw("Diesel_1", 2030) == 0.0
     end
 
     @testset "Case functions" begin
@@ -61,6 +65,10 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
         @test IP.adjust_planning_system!(:sys, [2025]) == :sys
 
         sys, timestamps = IP.build_case_system(; verbose = false)
+        wind_mw(s) = IP.PSY.with_units_base(() -> IP.PSY.get_max_active_power(IP.PSY.get_component(IP.PSY.RenewableDispatch, s, "Wind_1")),
+                                            s, IP.PSY.UnitSystem.NATURAL_UNITS)
+        @test wind_mw(IP._apply_planned_retirements!(IP.build_case_system()[1], 2025)) ≈ 3.0
+        @test wind_mw(IP._apply_planned_retirements!(IP.build_case_system()[1], 2026)) ≈ 2.0
         @test first(timestamps) == DateTime(2025, 1, 1)
         @test last(timestamps) == DateTime(2027, 12, 31, 23)
         @test length(collect(IP.PSY.get_components(IP.PSY.ThermalStandard, sys))) == 1

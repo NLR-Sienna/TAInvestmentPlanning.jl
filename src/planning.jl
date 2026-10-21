@@ -445,7 +445,7 @@ function build_planning_portfolio(
             region = [nodes[wind.bus]],
             available = true,
             capacity_limits = (min=0.0, max=wind.capacity_mw),
-            capital_costs = PSIP.LinearCurve(wind.capital_cost_total),
+            capital_costs = PSIP.LinearCurve(wind.capital_cost_total / wind.capacity_mw),  # $/MW from the per-unit cost
             operation_costs = renewable_op_cost,
             unit_size = wind.capacity_mw,
             id = wind.id,
@@ -505,7 +505,7 @@ function build_planning_portfolio(
             region = [nodes[opt.bus]],
             available = true,
             capacity_limits = (min=0.0, max=opt.capacity_mw),
-            capital_costs = PSIP.LinearCurve(opt.capital_cost_total),
+            capital_costs = PSIP.LinearCurve(opt.capital_cost_total / opt.capacity_mw),  # $/MW from the per-unit cost
             operation_costs = diesel_op_cost,
             unit_size = opt.capacity_mw,
             id = diesel_id,
@@ -828,7 +828,14 @@ function build_planning_template(
     end
 
     # Weights: equal across all representative periods
-    weights = ones(length(rep_periods_all)) ./ length(rep_periods_all)
+    # Each sampled hour stands for 8760 / (sampled hours per year) hours in every year of its interval.
+    # PSI2 multiplies operating costs by the weight and discounts them by the representative year, so
+    # the weight carries the remaining years of the interval relative to that year.
+    periods_per_interval = length(rep_periods_all) ÷ length(rep_years)
+    hour_values = _interval_hour_values(intervals, periods_per_interval * 168)
+    df = 1 / (1 + settings().discount_rate)
+    weights = vcat([fill(hour_values[i] / df^(rep_years[i] - settings().base_year), periods_per_interval)
+                    for i in eachindex(rep_years)]...)
     operation_model = PSI2.OperationalRepresentativeDays(rep_periods_all, weights)
 
     # Template: DiscountedCashFlow (multiple intervals) + OperationalRepresentativeDays + EnergyLowerBound + NodalBalanceModel
@@ -973,6 +980,36 @@ end
 _in_service_mw(gen, year) =
     max(PSY.get_max_active_power(gen) - (isnothing(year) ? 0.0 : retired_capacity_mw(PSY.get_name(gen), year)), 0.0)
 
+# Present value (base-year dollars) of one dollar of cost in a sampled hour of each investment interval:
+# the hours a sampled hour stands for in each year of the interval (8760 / sampled hours per year),
+# discounted to the base year. Operating costs (through the representative-period weights) and the
+# per-MWh and per-gallon penalties use this scale, so penalties are real $/MWh and $/gal.
+function _interval_hour_values(intervals, hours_per_interval::Integer)
+    df = 1 / (1 + settings().discount_rate)
+    return [8760 / hours_per_interval * sum(df^(y - settings().base_year) for y in Dates.year(s):Dates.year(e))
+            for (s, e) in intervals]
+end
+
+# Penalty expression for a slack indexed by time step (or node and time step), valued per sampled hour
+function _hourly_penalty(slack, portfolio, penalty::Float64)
+    intervals = _PORTFOLIO_INTERVAL_DATA[objectid(portfolio)].intervals
+    steps = axes(slack)[end]
+    hours_per_interval = length(steps) ÷ length(intervals)
+    hour_values = _interval_hour_values(intervals, hours_per_interval)
+    hour_penalty(t) = penalty * hour_values[div(t - 1, hours_per_interval) + 1]
+    expr = JuMP.AffExpr(0.0)
+    if ndims(slack) == 1
+        for t in steps
+            JuMP.add_to_expression!(expr, hour_penalty(t), slack[t])
+        end
+    else
+        for n in axes(slack, 1), t in steps
+            JuMP.add_to_expression!(expr, hour_penalty(t), slack[n, t])
+        end
+    end
+    return expr
+end
+
 function _existing_capacity_mw(portfolio; year = nothing)
     sys = PSIP.get_base_system(portfolio)
     isnothing(sys) && return 0.0
@@ -1016,7 +1053,8 @@ function _add_reserve_margin_slack!(model::PSI2.InvestmentModel, portfolio)
     if _SLACKS.nodal[] && haskey(jm.ext, :nodal_balance_slack_pos)
         slack_pos = jm.ext[:nodal_balance_slack_pos]
         slack_neg = jm.ext[:nodal_balance_slack_neg]
-        nodal_penalty = (sum(slack_pos) + sum(slack_neg)) * settings().unserved_energy_per_mwh
+        nodal_penalty = _hourly_penalty(slack_pos, portfolio, settings().unserved_energy_per_mwh) +
+                        _hourly_penalty(slack_neg, portfolio, settings().unserved_energy_per_mwh)
         slack_penalties_expr = slack_penalties_expr + nodal_penalty
     else
         @warn "Nodal slack variables NOT found in jm.ext (ENABLE=$_SLACKS.nodal[], haskey=$(haskey(jm.ext, :nodal_balance_slack_pos)))"
@@ -1024,7 +1062,7 @@ function _add_reserve_margin_slack!(model::PSI2.InvestmentModel, portfolio)
 
     if _SLACKS.energy[] && haskey(jm.ext, :energy_feasibility_slack)
         energy_slack = jm.ext[:energy_feasibility_slack]
-        energy_penalty = sum(energy_slack) * settings().unserved_energy_per_mwh
+        energy_penalty = _hourly_penalty(energy_slack, portfolio, settings().unserved_energy_per_mwh)
         slack_penalties_expr = slack_penalties_expr + energy_penalty
     end
     reserve_margin = portfolio.metadata.reserve_margin
@@ -1332,7 +1370,9 @@ function _apply_diesel_fuel_cap!(model::PSI2.InvestmentModel, portfolio::PSIP.Po
     fuel = [JuMP.AffExpr(0.0) for _ in 1:n_intervals]
     for (unit, t, v) in dispatch
         interval = div(t - 1, hours_per_interval) + 1
-        heat_rate = something(case_rated_heat_rate(unit), settings().default_heat_rate)
+        heat_rate = something(case_rated_heat_rate(unit),
+                              technology_kind(unit) == "Diesel" ? settings().candidates.diesel_heat_rate_mbtu_per_mwh :
+                              settings().default_heat_rate)
         gal_per_mwh = heat_rate / case_fuel_hhv_mbtu_per_gal()
         JuMP.add_to_expression!(fuel[interval], gal_per_mwh, v)
     end
@@ -1345,7 +1385,8 @@ function _apply_diesel_fuel_cap!(model::PSI2.InvestmentModel, portfolio::PSIP.Po
     jm.ext[:tier2_annual_scale] = annual_scale
 
     current_obj = JuMP.objective_function(jm)
-    JuMP.@objective(jm, Min, current_obj + settings().tier2_penalty_per_gal * sum(slack))
+    hour_values = _interval_hour_values(_PORTFOLIO_INTERVAL_DATA[objectid(portfolio)].intervals, hours_per_interval)
+    JuMP.@objective(jm, Min, current_obj + settings().tier2_penalty_per_gal * sum(hour_values[i] * slack[i] for i in 1:n_intervals))
     @info "System diesel fuel cap: $(Int(settings().tier2_fuel_limit_gal)) gal/yr per interval, \$$(Int(settings().tier2_penalty_per_gal))/gal penalty, $(length(dispatch)) diesel dispatch variables"
     return
 end
@@ -1378,7 +1419,9 @@ function _apply_tier2_hours_limit!(model::PSI2.InvestmentModel, portfolio::PSIP.
                             units = units, n_intervals = n_intervals)
 
     current_obj = JuMP.objective_function(jm)
-    JuMP.@objective(jm, Min, current_obj + settings().tier2_hours_penalty_per_mwh * sum(slack))
+    hour_values = _interval_hour_values(_PORTFOLIO_INTERVAL_DATA[objectid(portfolio)].intervals, hours_per_interval)
+    JuMP.@objective(jm, Min, current_obj +
+        settings().tier2_hours_penalty_per_mwh * sum(hour_values[i] * slack[u, i] for u in units, i in 1:n_intervals))
     @info "Tier 2 hours limit: $(hours) h/yr full-load equivalent for $(length(units)) units, \$$(settings().tier2_hours_penalty_per_mwh)/MWh penalty above the limit"
     return
 end
@@ -2032,13 +2075,21 @@ function report_planning_results(
                         try
                             tech = PSIP.get_technology(PSIP.Technology, port, tech_name)
                             if !isnothing(tech)
-                                cap_cost = PSIP.get_capital_costs(tech)
+                                cap_cost = tech isa PSIP.StorageTechnology ? nothing : PSIP.get_capital_costs(tech)
+                                if tech isa PSIP.StorageTechnology
+                                    # $/MW of power plus $/MWh of energy
+                                    entry = settings().catalog[tech_name]
+                                    total_cost = PSIP.get_capital_costs_discharge(tech).function_data.proportional_term * capacity +
+                                                 PSIP.get_capital_costs_energy(tech).function_data.proportional_term *
+                                                 capacity * entry.energy_mwh / entry.power_mw
+                                    total_capital_cost += total_cost
+                                    println("  • $tech_name: \$$(round(total_cost, digits=0)) total")
+                                end
                                 if !isnothing(cap_cost)
-                                    # Capital cost in $/kW, capacity in MW
                                     try
-                                        # LinearCurve stores slope in function_data.proportional_term ($/kW)
+                                        # LinearCurve slope is $/MW of built capacity
                                         unit_cost = cap_cost.function_data.proportional_term
-                                        total_cost = unit_cost * capacity * 1000  # Convert MW to kW, result in $
+                                        total_cost = unit_cost * capacity
                                         total_capital_cost += total_cost
 
                                         # Get recovery period for annualization

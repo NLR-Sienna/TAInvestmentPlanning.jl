@@ -563,6 +563,16 @@ function _attach_time_series_to_portfolio!(
     # Pre-generate full-horizon timestamps for consistency
     full_horizon_timestamps = _generate_full_horizon_timestamps(rep_years)
 
+    # Hourly profiles come from the base system: candidate and planned wind use the reference wind
+    # unit's capacity factors, and the base demand is the system's actual load, for the same hours.
+    base_system = PSIP.get_base_system(port)
+    reference_wind = PSY.get_component(PSY.RenewableDispatch, base_system, settings().pcm.reference_wind_unit)
+    isnothing(reference_wind) &&
+        @warn "Reference wind unit $(settings().pcm.reference_wind_unit) not found; candidate wind uses a synthetic capacity factor"
+    base_loads = collect(PSY.get_components(PSY.PowerLoad, base_system))
+    base_load_ratings = PSY.with_units_base(() -> PSY.get_max_active_power.(base_loads), base_system, PSY.UnitSystem.NATURAL_UNITS)
+    custom_profiles = Dict{String, Vector{Float64}}()
+
     for (interval_idx, (interval, peak_mw, rep_year)) in enumerate(zip(intervals, peak_mws, rep_years))
         year_str = string(rep_year)
         # Generate 12 monthly representative periods for this interval
@@ -580,15 +590,16 @@ function _attach_time_series_to_portfolio!(
             # Extract the 168-h window for this month (15th of the month + 7 days)
             rep_day_stamps = rep_timestamps[(month_num-1)*168+1 : month_num*168]
 
-            # Wind capacity factors: constant + hourly variation
-            month_cf_wind = settings().synthetic_wind_capacity_factor
-            wind_cf_hourly = [month_cf_wind * (0.95 + 0.10*rand()) for _ in 1:length(rep_day_stamps)]
+            # Wind capacity factors for these hours
+            wind_cf_hourly = if isnothing(reference_wind)
+                [settings().synthetic_wind_capacity_factor * (0.95 + 0.10*rand()) for _ in 1:length(rep_day_stamps)]
+            else
+                _hourly_profile(reference_wind, rep_day_stamps)
+            end
 
-            # Load profile scaled to peak_mw for this interval
-            load_profile_hourly = [
-                peak_mw * (0.5 + 0.5 * sin(2π * (Dates.hour(ts) - 4) / 24))
-                for ts in rep_day_stamps
-            ]
+            # Base demand: the system's actual load (MW) in these hours. Load arrivals are separate demands.
+            load_profile_hourly = sum(_hourly_profile(load, rep_day_stamps) .* rating
+                                      for (load, rating) in zip(base_loads, base_load_ratings))
 
             # Attach wind to candidate technologies
             # Attach wind CF to all wind turbine expansion options regardless of procurement availability
@@ -629,15 +640,16 @@ function _attach_time_series_to_portfolio!(
                     if arrival.year <= rep_year
                         # Load has arrived: use its demand profile
                         if arrival.conforming
-                            # Conforming: follows the system load shape with peak equal to arrival MW
-                            # Scale by (arrival.mw / peak_mw) so peak = arrival.mw
-                            scaled_profile = load_profile_hourly .* (arrival.mw / peak_mw)
+                            # Conforming: follows the system load shape, scaled so the base peak maps to arrival MW
+                            scaled_profile = load_profile_hourly .* (arrival.mw / case_base_peak_load_mw())
                         else
                             # Non-conforming: use custom profile if provided, else flat
                             if !isnothing(arrival.custom_profile_path) && !isempty(arrival.custom_profile_path)
-                                # Load custom normalized profile (0-1) and scale by arrival.mw
-                                normalized_profile = load_custom_profile(arrival.custom_profile_path, length(rep_day_stamps))
-                                scaled_profile = normalized_profile .* arrival.mw
+                                # Custom normalized hourly profile (0-1) for these hours of the year, scaled by arrival.mw
+                                profile = get!(() -> load_custom_profile(arrival.custom_profile_path, 8760),
+                                               custom_profiles, arrival.custom_profile_path)
+                                scaled_profile = [profile[mod1((Dates.dayofyear(ts) - 1) * 24 + Dates.hour(ts) + 1, length(profile))]
+                                                  for ts in rep_day_stamps] .* arrival.mw
                             else
                                 # Flat load profile (constant throughout all hours)
                                 scaled_profile = fill(arrival.mw, length(rep_day_stamps))
@@ -679,6 +691,12 @@ function _attach_time_series_to_portfolio!(
         end
     end
 end
+
+# Unscaled max_active_power values of a base-system component for the given consecutive hours
+_hourly_profile(component, timestamps) = PSY.get_time_series_values(
+    PSY.SingleTimeSeries, component, "max_active_power";
+    start_time = first(timestamps), len = length(timestamps), ignore_scaling_factors = true,
+)
 
 function _add_single_time_series!(port, tech, ts_name, timestamps, values, rep_day, year_str)
     # Add a single-day time series to a technology with year/rep_day metadata tags

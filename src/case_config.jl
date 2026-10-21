@@ -11,7 +11,8 @@
 #   [emission_tiers]     existing_default (tier of existing thermal units), optional [emission_tiers.existing]
 #                        table of unit name = tier overrides; each [[candidates.diesel]] has a tier
 #   [solver]             mip_gap, time_limit_s
-#   [planning]           reserve_margin, synthetic_wind_capacity_factor
+#   [planning]           reserve_margin, synthetic_wind_capacity_factor (CEM wind CF only when [pcm]
+#                        reference_wind_unit is not in the system)
 #   [base_demand]        name, bus
 #   [scenarios]          arrivals (JSON of load arrival scenarios), default_scenario (name in that file),
 #                        default_procurement_timelines (JSON); paths are relative to the case directory

@@ -22,7 +22,11 @@
 #   [[planned_retirements]] unit, capacity_mw, year: MW of an existing unit retired from `year` on
 #   [candidates]         diesel_heat_rate_mbtu_per_mwh, diesel_start_up_cost, diesel_shut_down_cost,
 #                        battery_efficiency, battery_lifetime_years, battery_power_cost_share,
-#                        and [[candidates.battery]], [[candidates.diesel]], [[candidates.wind]] tables
+#                        optional max_units (default 1), and [[candidates.battery]], [[candidates.diesel]],
+#                        [[candidates.wind]] tables. Diesel and battery candidates take an optional max_units
+#                        (default [candidates] max_units): how many units of the candidate the CEM may build.
+#                        Diesel units are separate identical candidates named <name>, <name>_2, ...; a battery
+#                        candidate is one continuous build of up to max_units x its size. Wind is one unit each.
 #   [report.benchmarks]  optional: source, hydro_mwh, wind_mwh, renewable_share_pct (printed as given)
 #   [capacity_credit]    optional: method = "net_load" (default; wind and solar credited at their mean
 #                        CF over the top_hours highest net-load hours) or "fixed", top_hours (default 100)
@@ -30,13 +34,31 @@
 _nt(d::AbstractDict) = (; (Symbol(k) => v for (k, v) in d)...)
 
 battery_candidate_name(b) = "Battery_$(b.power_mw)MW_$(b.energy_mwh)MWh"
-diesel_candidate_name(d) = "Diesel_$(d.unit_name)_$(d.site)"
+diesel_base_name(d) = "Diesel_$(d.unit_name)_$(d.site)"
+diesel_candidate_name(d) = _unit_name(diesel_base_name(d), get(d, :unit_index, 1))
+
+# Unit k of a multi-unit candidate: the first unit keeps the candidate name, the others get _k
+_unit_name(base_name, k) = k == 1 ? base_name : "$(base_name)_$k"
+
+# Candidate with its max_units (the candidate's own, else the [candidates] default)
+function _with_max_units(entry::NamedTuple, name::AbstractString, default_max_units)
+    n = get(entry, :max_units, default_max_units)
+    (n isa Integer && n >= 1) || error("Candidate $name: max_units must be a whole number of at least 1, got $n")
+    return merge(entry, (max_units = Int(n),))
+end
+
+# A diesel candidate with max_units = N becomes N identical one-unit candidates that share its settings
+function _expand_diesel_units(d::NamedTuple, default_max_units)
+    d = _with_max_units(d, diesel_base_name(d), default_max_units)
+    return [merge(d, (base_name = diesel_base_name(d), unit_index = k)) for k in 1:d.max_units]
+end
 
 function load_candidates(cfg::AbstractDict)
     c = cfg["candidates"]
+    default_max_units = get(c, "max_units", 1)
     return (
-        battery = [_nt(b) for b in c["battery"]],
-        diesel = [_nt(d) for d in c["diesel"]],
+        battery = [_with_max_units(_nt(b), battery_candidate_name(_nt(b)), default_max_units) for b in c["battery"]],
+        diesel = [u for d in c["diesel"] for u in _expand_diesel_units(_nt(d), default_max_units)],
         wind = [_nt(w) for w in c["wind"]],
         diesel_heat_rate_mbtu_per_mwh = c["diesel_heat_rate_mbtu_per_mwh"],
         diesel_start_up_cost = c["diesel_start_up_cost"],
@@ -47,16 +69,17 @@ function load_candidates(cfg::AbstractDict)
     )
 end
 
-# Name → (kind, pcm_bus, sizes) for every candidate and planned addition
+# Name → (kind, pcm_bus, sizes) for every candidate and planned addition. Diesel units also have
+# base_name (the candidate they are a unit of), unit_index, and max_units; batteries have max_units.
 function build_technology_catalog(candidates, planned_additions)
     catalog = Dict{String, NamedTuple}()
     for b in candidates.battery
-        catalog[battery_candidate_name(b)] =
-            (kind = "Battery", pcm_bus = b.pcm_bus, power_mw = b.power_mw, energy_mwh = b.energy_mwh)
+        catalog[battery_candidate_name(b)] = (kind = "Battery", pcm_bus = b.pcm_bus, power_mw = b.power_mw,
+            energy_mwh = b.energy_mwh, max_units = b.max_units)
     end
     for d in candidates.diesel
-        catalog[diesel_candidate_name(d)] =
-            (kind = "Diesel", pcm_bus = d.pcm_bus, capacity_mw = d.capacity_mw, tier = d.tier)
+        catalog[diesel_candidate_name(d)] = (kind = "Diesel", pcm_bus = d.pcm_bus, capacity_mw = d.capacity_mw,
+            tier = d.tier, base_name = d.base_name, unit_index = d.unit_index, max_units = d.max_units)
     end
     for w in candidates.wind
         catalog[w.name] = (kind = "Wind", pcm_bus = w.pcm_bus, capacity_mw = w.capacity_mw)
@@ -74,15 +97,19 @@ function _capacity_credit_settings(cfg::AbstractDict)
 end
 
 # Override fields of candidates in the parsed case.toml: candidate name => Dict(field => value).
-# Only fields the candidate already has can be changed, and not the fields that make up its name.
+# Only fields the candidate already has can be changed (and max_units of diesel and battery
+# candidates), not the fields that make up its name.
 function _apply_candidate_overrides!(cfg::AbstractDict, overrides::AbstractDict)
     isempty(overrides) && return cfg
     entries = Dict{String, Dict}()
+    multi_unit = Set{String}()  # candidates that can take max_units
     for b in cfg["candidates"]["battery"]
         entries[battery_candidate_name(_nt(b))] = b
+        push!(multi_unit, battery_candidate_name(_nt(b)))
     end
     for d in cfg["candidates"]["diesel"]
-        entries[diesel_candidate_name(_nt(d))] = d
+        entries[diesel_base_name(_nt(d))] = d
+        push!(multi_unit, diesel_base_name(_nt(d)))
     end
     for w in cfg["candidates"]["wind"]
         entries[w["name"]] = w
@@ -95,7 +122,8 @@ function _apply_candidate_overrides!(cfg::AbstractDict, overrides::AbstractDict)
         for (field, value) in fields
             field = String(field)
             field in naming_fields && error("Cannot override \"$field\" of $name: it defines the candidate name")
-            haskey(entry, field) || error("Candidate $name has no field \"$field\" to override")
+            haskey(entry, field) || (field == "max_units" && name in multi_unit) ||
+                error("Candidate $name has no field \"$field\" to override")
             entry[field] = value
         end
     end

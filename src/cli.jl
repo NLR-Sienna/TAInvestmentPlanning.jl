@@ -164,13 +164,16 @@ _horizon_end(args, arrivals) =
     something(get(args, "horizon-end", nothing), maximum(a.year for a in arrivals; init = settings().base_year))
 
 # Check exogenous builds against the case before building anything: known candidate, build year in
-# the planning horizon and in the candidate's procurement window, and whole units for diesel and wind.
+# the planning horizon and in the candidate's procurement window, whole units for diesel and wind, and
+# at most max_units units of a diesel or battery candidate in all (repeated entries add up).
 function _check_exogenous_builds(builds, procurement_timelines, horizon_end::Int)
     isnothing(builds) && return
     problems = String[]
     catalog = settings().catalog
     timelines = something(procurement_timelines, default_procurement_timelines())
-    for (tech, year_mw) in builds, (year, mw) in year_mw
+    units_built = Dict{String, Float64}()  # diesel or battery candidate => units built in all
+    for (tech, year_mw) in builds, year in sort(collect(keys(year_mw)))
+        mw = year_mw[year]
         if !haskey(catalog, tech)
             push!(problems, "$tech is not a candidate technology")
             continue
@@ -178,16 +181,28 @@ function _check_exogenous_builds(builds, procurement_timelines, horizon_end::Int
         settings().base_year <= year <= horizon_end ||
             push!(problems, "$tech $year is outside the planning horizon $(settings().base_year)-$horizon_end (set --horizon-end)")
         mw > 1e-6 || continue
-        first_year, last_year = get(timelines, tech, (typemin(Int), typemax(Int)))
+        entry = catalog[tech]
+        candidate = get(entry, :base_name, tech)
+        first_year, last_year = get(timelines, tech, get(timelines, candidate, (typemin(Int), typemax(Int))))
         first_year <= year <= last_year ||
             push!(problems, "$tech $year is outside its procurement window $first_year-$last_year")
-        entry = catalog[tech]
-        if entry.kind in ("Diesel", "Wind") && !(any(a -> a.name == tech, settings().planned_additions))
-            abs(mw - entry.capacity_mw) <= 1e-6 ||
-                push!(problems, "$tech $year builds $mw MW; a build is one $(entry.capacity_mw) MW unit (or 0)")
-        elseif entry.kind == "Battery"
-            mw <= entry.power_mw + 1e-6 || push!(problems, "$tech $year builds $mw MW; at most $(entry.power_mw) MW")
+        if entry.kind == "Battery"
+            units_built[candidate] = get(units_built, candidate, 0.0) + mw / entry.power_mw
+        elseif entry.kind in ("Diesel", "Wind") && !(any(a -> a.name == tech, settings().planned_additions))
+            n = mw / entry.capacity_mw
+            if abs(n - round(n)) > 1e-6 || (entry.kind == "Wind" && round(n) > 1)
+                push!(problems, "$tech $year builds $mw MW; a build is " *
+                    (entry.kind == "Wind" ? "one $(entry.capacity_mw) MW unit (or 0)" : "a whole number of $(entry.capacity_mw) MW units"))
+            elseif entry.kind == "Diesel"
+                units_built[candidate] = get(units_built, candidate, 0.0) + round(n)
+            end
         end
+    end
+    for (candidate, n) in units_built
+        entry = catalog[candidate]
+        n <= entry.max_units + 1e-6 || push!(problems, entry.kind == "Battery" ?
+            "$candidate builds $(n * entry.power_mw) MW in all; at most $(entry.max_units) x $(entry.power_mw) MW (max_units = $(entry.max_units))" :
+            "$candidate builds $(Int(n)) units; max_units is $(entry.max_units)")
     end
     isempty(problems) || error("Exogenous builds do not fit the case:\n  " * join(problems, "\n  "))
     return

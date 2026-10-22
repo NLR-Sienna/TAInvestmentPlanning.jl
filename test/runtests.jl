@@ -40,7 +40,7 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
         @test IP.battery_candidate_name(only(s.candidates.battery)) == "Battery_1.0MW_4.0MWh"
         @test IP.diesel_candidate_name(only(s.candidates.diesel)) == "Diesel_Recip_2MW_Main"
         @test sort(collect(keys(s.catalog))) == ["Battery_1.0MW_4.0MWh", "Diesel_Recip_2MW_Main", "Wind_new_1"]
-        @test s.catalog["Battery_1.0MW_4.0MWh"] == (kind = "Battery", pcm_bus = "East", power_mw = 1.0, energy_mwh = 4.0)
+        @test s.catalog["Battery_1.0MW_4.0MWh"] == (kind = "Battery", pcm_bus = "East", power_mw = 1.0, energy_mwh = 4.0, max_units = 1)
         @test IP.technology_kind("Wind_new_1") == "Wind"
         @test IP.technology_kind("Diesel_Recip_2MW_Main") == "Diesel"
         @test isnothing(IP.technology_kind("Not_A_Technology"))
@@ -122,8 +122,9 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
         @test merged["Wind_new_1"] == (2027, 2027)
         @test merged["Battery_1.0MW_4.0MWh"] == (2025, 9999)
 
-        # Repeated keys are an error (JSON.parse would keep only the last)
-        @test_throws "duplicate key \"Wind_new_1\"" parse_exogenous_builds("""{"Wind_new_1": {"2026": 1.5}, "Wind_new_1": {"2027": 1.5}}""")
+        # Repeated technologies and years add up (e.g. one entry per unit)
+        repeated = parse_exogenous_builds("""{"Wind_new_1": {"2026": 1.5}, "Wind_new_1": {"2027": 1.5, "2027": 1.5}}""")
+        @test repeated == Dict("Wind_new_1" => Dict(2026 => 1.5, 2027 => 3.0))
         builds = parse_exogenous_builds("""{"Battery_1.0MW_4.0MWh": {"2026": 1.0}, "Wind_new_1": {"2026": 0}}""")
         @test builds["Battery_1.0MW_4.0MWh"] == Dict(2026 => 1.0)
         @test builds["Wind_new_1"] == Dict(2026 => 0.0)
@@ -215,7 +216,52 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
         @test_throws "not a candidate" IP._check_exogenous_builds(Dict("Diesel_X" => Dict(2026 => 1.0)), timelines, 2026)
         @test_throws "outside the planning horizon" IP._check_exogenous_builds(Dict("Diesel_Recip_2MW_Main" => Dict(2028 => 2.0)), timelines, 2026)
         @test_throws "procurement window" IP._check_exogenous_builds(Dict("Wind_new_1" => Dict(2025 => 1.5)), timelines, 2026)
-        @test_throws "one 2.0 MW unit" IP._check_exogenous_builds(Dict("Diesel_Recip_2MW_Main" => Dict(2026 => 4.0)), timelines, 2026)
+        @test_throws "max_units is 1" IP._check_exogenous_builds(Dict("Diesel_Recip_2MW_Main" => Dict(2026 => 4.0)), timelines, 2026)
+        @test_throws "whole number of 2.0 MW units" IP._check_exogenous_builds(Dict("Diesel_Recip_2MW_Main" => Dict(2026 => 3.0)), timelines, 2026)
+    end
+
+    @testset "Multi-unit candidates" begin
+        @test settings().catalog["Diesel_Recip_2MW_Main"].max_units == 1
+        @test_throws "has no field \"max_units\"" set_candidate_overrides!(Dict("Wind_new_1" => Dict("max_units" => 2)))
+        @test_throws "max_units must be" set_candidate_overrides!(Dict("Diesel_Recip_2MW_Main" => Dict("max_units" => 0)))
+
+        # Diesel max_units = N gives N identical one-unit candidates: the candidate name, then _2 ... _N.
+        # A battery may build up to max_units x its size.
+        set_candidate_overrides!(Dict("Diesel_Recip_2MW_Main" => Dict("max_units" => 3, "tier" => 2),
+                                      "Battery_1.0MW_4.0MWh" => Dict("max_units" => 2)))
+        try
+            catalog = settings().catalog
+            diesel_units = ["Diesel_Recip_2MW_Main", "Diesel_Recip_2MW_Main_2", "Diesel_Recip_2MW_Main_3"]
+            @test IP.diesel_candidate_name.(settings().candidates.diesel) == diesel_units
+            @test all(catalog[u].capacity_mw == 2.0 && unit_tier(u) == 2 && catalog[u].base_name == diesel_units[1] for u in diesel_units)
+            @test IP._candidate_units() == Dict("Diesel_Recip_2MW_Main" => diesel_units)
+            @test catalog["Battery_1.0MW_4.0MWh"].max_units == 2
+            @test [w.name for w in settings().candidates.wind] == ["Wind_new_1"]
+
+            # Units share the candidate's procurement window
+            timelines = IP._unit_procurement_timelines(Dict("Diesel_Recip_2MW_Main" => (2026, 9999)))
+            @test timelines["Diesel_Recip_2MW_Main_3"] == (2026, 9999)
+
+            # Diesel builds are whole units, at most max_units in all, assigned to units in year order
+            timelines = default_procurement_timelines()
+            builds = parse_exogenous_builds("""{"Diesel_Recip_2MW_Main": {"2026": 2.0}, "Diesel_Recip_2MW_Main": {"2026": 2.0, "2027": 2.0},
+                                               "Battery_1.0MW_4.0MWh": {"2026": 1.0}, "Battery_1.0MW_4.0MWh": {"2027": 1.0}}""")
+            @test isnothing(IP._check_exogenous_builds(builds, timelines, 2027))
+            unit_builds = IP._unit_exogenous_builds(builds)
+            @test unit_builds["Diesel_Recip_2MW_Main"] == Dict(2026 => 2.0)
+            @test unit_builds["Diesel_Recip_2MW_Main_2"] == Dict(2026 => 2.0)
+            @test unit_builds["Diesel_Recip_2MW_Main_3"] == Dict(2027 => 2.0)
+            @test unit_builds["Battery_1.0MW_4.0MWh"] == Dict(2026 => 1.0, 2027 => 1.0)
+            @test IP._unit_exogenous_builds(Dict("Wind_new_1" => Dict(2026 => 1.5))) == Dict("Wind_new_1" => Dict(2026 => 1.5))
+            @test_throws "max_units is 3" IP._check_exogenous_builds(Dict("Diesel_Recip_2MW_Main" => Dict(2026 => 6.0, 2027 => 2.0)), timelines, 2027)
+            @test_throws "at most 2 x 1.0 MW" IP._check_exogenous_builds(Dict("Battery_1.0MW_4.0MWh" => Dict(2026 => 1.5, 2027 => 1.0)), timelines, 2027)
+            @test_throws "one 1.5 MW unit" IP._check_exogenous_builds(Dict("Wind_new_1" => Dict(2026 => 3.0)), timelines, 2027)
+            @test_throws "max_units is 3" IP._unit_exogenous_builds(Dict("Diesel_Recip_2MW_Main" => Dict(2026 => 8.0)))
+            @test_throws "whole number" IP._unit_exogenous_builds(Dict("Diesel_Recip_2MW_Main" => Dict(2026 => 3.0)))
+        finally
+            set_candidate_overrides!()
+        end
+        @test IP._candidate_units() == Dict("Diesel_Recip_2MW_Main" => ["Diesel_Recip_2MW_Main"])
     end
 
     @testset "CEM and PCM on the tiny case" begin
@@ -261,6 +307,22 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
                     "--exogenous-builds={\"Wind_new_1\": {\"2026\": 1.5}}"]))
                 forced = JSON.parsefile(joinpath("results", "planning", "growth", "summary.json"))
                 @test forced["investments_mw"]["Wind_new_1"] ≈ 1.5
+
+                # Several units of one candidate, given as repeated entries
+                set_candidate_overrides!(Dict("Diesel_Recip_2MW_Main" => Dict("max_units" => 3),
+                                              "Battery_1.0MW_4.0MWh" => Dict("max_units" => 2)))
+                try
+                    run_cem_workflow(parse_cmdline(["cem", "--day-start=1", "--day-end=2",
+                        "--exogenous-builds={\"Diesel_Recip_2MW_Main\": {\"2026\": 2.0}, \"Diesel_Recip_2MW_Main\": {\"2026\": 2.0}, " *
+                        "\"Battery_1.0MW_4.0MWh\": {\"2026\": 1.0}, \"Battery_1.0MW_4.0MWh\": {\"2026\": 1.0}}"]))
+                    multi = JSON.parsefile(joinpath("results", "planning", "growth", "summary.json"))
+                    @test multi["investments_mw"]["Diesel_Recip_2MW_Main"] ≈ 2.0
+                    @test multi["investments_mw"]["Diesel_Recip_2MW_Main_2"] ≈ 2.0
+                    @test get(multi["investments_mw"], "Diesel_Recip_2MW_Main_3", 0.0) ≈ 0.0 atol = 1e-6
+                    @test multi["investments_mw"]["Battery_1.0MW_4.0MWh"] ≈ 2.0
+                finally
+                    set_candidate_overrides!()
+                end
 
                 ref_cem = JSON.parsefile(joinpath(REFERENCE_DIR, "tiny_cem.json"))
                 ref_pcm = JSON.parsefile(joinpath(REFERENCE_DIR, "tiny_pcm.json"))

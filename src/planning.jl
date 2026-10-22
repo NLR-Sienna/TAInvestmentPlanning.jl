@@ -324,6 +324,7 @@ function build_planning_portfolio(
     last_year = something(horizon_end, maximum(a.year for a in arrivals; init=settings().base_year))
     intervals, peak_mws, rep_years = compute_investment_intervals(arrivals; horizon_end = last_year,
         extra_years = [extra_years; [a.year for a in settings().planned_additions]])
+    procurement_timelines = _unit_procurement_timelines(procurement_timelines)
 
     # Build the underlying PowerSystems.System
     sys, _ = build_case_system(; diesel_price=diesel_price, verbose=false)
@@ -482,9 +483,9 @@ function build_planning_portfolio(
             storage_tech = PowerSystems.StorageTech.LIB,
             prime_mover_type = PowerSystems.PrimeMovers.BA,
             lifetime = settings().candidates.battery_lifetime_years,
-            capacity_limits_discharge = (min=0.0, max=opt.power_mw),
-            capacity_limits_charge = (min=0.0, max=opt.power_mw),
-            capacity_limits_energy = (min=0.0, max=opt.energy_mwh),
+            capacity_limits_discharge = (min=0.0, max=opt.max_units * opt.power_mw),  # up to max_units units
+            capacity_limits_charge = (min=0.0, max=opt.max_units * opt.power_mw),
+            capacity_limits_energy = (min=0.0, max=opt.max_units * opt.energy_mwh),
             duration_limits = (min=opt.energy_mwh / opt.power_mw, max=opt.energy_mwh / opt.power_mw),
             capital_costs_discharge = PSIP.LinearCurve(opt.capital_cost_total * power_cost_share / opt.power_mw),
             capital_costs_charge = PSIP.LinearCurve(0.0),  # power rating already costed via discharge
@@ -890,7 +891,7 @@ function build_planning_template(
 
     # Candidate Diesel: discrete units (binary investment per unit, not continuous)
     # All diesel options are now optional candidates with capital costs (no forced/exogenous builds)
-    all_diesel_names = ["Diesel_$(d.unit_name)_$(d.site)" for d in settings().candidates.diesel]
+    all_diesel_names = [diesel_candidate_name(d) for d in settings().candidates.diesel]
 
     # Filter diesel candidates by procurement availability in at least one investment period
     diesel_names = filter(all_diesel_names) do tech_name
@@ -1223,10 +1224,12 @@ function solve_planning(
         end
 
         # Planned additions are built in their year; user exogenous builds override them per technology
-        builds = merge(_planned_addition_builds(), something(exogenous_builds, Dict{String, Dict{Int, Float64}}()))
+        builds = merge(_planned_addition_builds(), something(_unit_exogenous_builds(exogenous_builds), Dict{String, Dict{Int, Float64}}()))
         if !isempty(builds)
             _fix_exogenous_builds!(model, portfolio, builds)
         end
+
+        _order_identical_units!(model, procurement_timelines)
 
         _apply_existing_availability!(model, portfolio)
 
@@ -1621,6 +1624,88 @@ function _limit_capital_to_horizon!(model::PSI2.InvestmentModel, portfolio::PSIP
     end
     @info "Capital costs limited to payments within the horizon (through $horizon_end): interval factors " *
           "$(round.(factors, digits=3)), $n_scaled build variables"
+    return
+end
+
+# Units of each diesel candidate in order: name => [name, name_2, ...]
+function _candidate_units()
+    units = Dict{String, Vector{String}}()
+    for (name, entry) in settings().catalog
+        haskey(entry, :base_name) && push!(get!(units, entry.base_name, String[]), name)
+    end
+    foreach(names -> sort!(names; by = n -> settings().catalog[n].unit_index), values(units))
+    return units
+end
+
+# Procurement windows are given per candidate; each unit of a multi-unit candidate shares its window
+# (unless the unit has a window of its own)
+function _unit_procurement_timelines(timelines::Dict{String, Tuple{Int, Int}})
+    unit_timelines = copy(timelines)
+    for (base_name, names) in _candidate_units(), name in names
+        haskey(timelines, base_name) && !haskey(timelines, name) && (unit_timelines[name] = timelines[base_name])
+    end
+    return unit_timelines
+end
+
+# Exogenous builds of multi-unit diesel candidates (given by candidate name, or a unit name, as MW in a
+# year) as builds of their units: each year's MW is a whole number of units, assigned to the candidate's
+# units in year order. Units not assigned a build are listed with no builds, so they are fixed unbuilt.
+function _unit_exogenous_builds(builds)
+    isnothing(builds) && return nothing
+    catalog = settings().catalog
+    unit_builds = Dict{String, Dict{Int, Float64}}()
+    candidate_builds = Dict{String, Dict{Int, Float64}}()
+    for (tech, year_mw) in builds
+        entry = get(catalog, tech, nothing)
+        target = isnothing(entry) || !haskey(entry, :base_name) ? unit_builds : candidate_builds
+        years = get!(target, isnothing(entry) ? tech : get(entry, :base_name, tech), Dict{Int, Float64}())
+        for (year, mw) in year_mw
+            years[year] = get(years, year, 0.0) + mw
+        end
+    end
+    units = _candidate_units()
+    for (base_name, year_mw) in candidate_builds
+        names = units[base_name]
+        unit_mw = catalog[base_name].capacity_mw
+        foreach(name -> unit_builds[name] = Dict{Int, Float64}(), names)
+        n_built = 0
+        for year in sort(collect(keys(year_mw)))
+            n = round(Int, year_mw[year] / unit_mw)
+            abs(n * unit_mw - year_mw[year]) <= 1e-6 ||
+                error("Exogenous build of $base_name in $year is $(year_mw[year]) MW, not a whole number of $unit_mw MW units")
+            n_built + n <= length(names) ||
+                error("Exogenous builds of $base_name reach $(n_built + n) units by $year; max_units is $(length(names))")
+            for name in names[(n_built + 1):(n_built + n)]
+                unit_builds[name][year] = unit_mw
+            end
+            n_built += n
+        end
+    end
+    return unit_builds
+end
+
+# Identical units of a candidate (same procurement window) are interchangeable; build them in order
+# (unit k by period p only if unit k-1 is built by then) so the solver does not search equivalent solutions
+function _order_identical_units!(model::PSI2.InvestmentModel, procurement_timelines::Dict{String, Tuple{Int, Int}})
+    jm = model.internal.container.JuMPmodel
+    build_vars = Dict{Tuple{String, Int}, JuMP.VariableRef}()
+    for v in JuMP.all_variables(jm)
+        vn = name(v)
+        contains(vn, "BuildCapacity") && !JuMP.is_binary(v) || continue
+        m = match(r"_\{([^{}]+), (\d+)\}$", vn)
+        isnothing(m) || (build_vars[(String(m.captures[1]), parse(Int, m.captures[2]))] = v)
+    end
+    periods = sort(unique(last.(keys(build_vars))))
+    n_added = 0
+    for names in values(_candidate_units()), k in 2:length(names), p in eachindex(periods)
+        get(procurement_timelines, names[k], nothing) == get(procurement_timelines, names[k - 1], nothing) || continue
+        built_by(unit) = [build_vars[(unit, q)] for q in periods[1:p] if haskey(build_vars, (unit, q))]
+        later, earlier = built_by(names[k]), built_by(names[k - 1])
+        isempty(later) && continue
+        JuMP.@constraint(jm, sum(later) <= sum(earlier; init = JuMP.AffExpr(0.0)))
+        n_added += 1
+    end
+    n_added > 0 && @info "Ordered builds of identical candidate units ($n_added constraints)"
     return
 end
 

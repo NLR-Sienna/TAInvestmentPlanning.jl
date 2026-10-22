@@ -9,43 +9,30 @@
     custom_profile_path::Union{String, Nothing} = nothing  # normalized (0-1) hourly profile for non-conforming loads
 end
 
-# JSON object that rejects repeated keys (JSON.parse would otherwise keep only the last one)
-struct _UniqueKeyDict <: AbstractDict{String, Any}
-    d::Dict{String, Any}
+# JSON object that keeps every key/value pair in order, including repeated keys
+struct _JSONPairs <: AbstractDict{String, Any}
+    pairs::Vector{Pair{String, Any}}
 end
-_UniqueKeyDict() = _UniqueKeyDict(Dict{String, Any}())
-function Base.setindex!(u::_UniqueKeyDict, v, k::AbstractString)
-    haskey(u.d, k) && throw(ArgumentError("duplicate key \"$k\""))
-    u.d[k] = v
-    return u
+_JSONPairs() = _JSONPairs(Pair{String, Any}[])
+Base.setindex!(o::_JSONPairs, v, k::AbstractString) = (push!(o.pairs, String(k) => v); o)
+Base.length(o::_JSONPairs) = length(o.pairs)
+Base.iterate(o::_JSONPairs, state...) = iterate(o.pairs, state...)
+function Base.get(o::_JSONPairs, k, default)
+    i = findlast(p -> p.first == k, o.pairs)
+    return isnothing(i) ? default : o.pairs[i].second
 end
-Base.getindex(u::_UniqueKeyDict, k) = u.d[k]
-Base.get(u::_UniqueKeyDict, k, default) = get(u.d, k, default)
-Base.haskey(u::_UniqueKeyDict, k) = haskey(u.d, k)
-Base.length(u::_UniqueKeyDict) = length(u.d)
-Base.iterate(u::_UniqueKeyDict, state...) = iterate(u.d, state...)
+Base.haskey(o::_JSONPairs, k) = any(p -> p.first == k, o.pairs)
 
-_plain_json(x) = x
-_plain_json(x::_UniqueKeyDict) = Dict{String, Any}(k => _plain_json(v) for (k, v) in x.d)
-_plain_json(x::AbstractVector) = Any[_plain_json(v) for v in x]
-
-function _parse_json_unique(text::AbstractString, description::AbstractString)
-    try
-        return _plain_json(JSON.parse(text; dicttype = _UniqueKeyDict))
-    catch e
-        e isa ArgumentError && startswith(e.msg, "duplicate key") &&
-            error("$(uppercasefirst(description)) input has a $(e.msg); each key may appear once")
-        rethrow()
-    end
-end
-
-function _read_json_input(input::AbstractString, description::AbstractString)
+# JSON input from a file path or a JSON string. With repeated_keys, objects keep repeated keys
+# (as _JSONPairs); otherwise a repeated key keeps its last value, as in JSON.parse.
+function _read_json_input(input::AbstractString, description::AbstractString; repeated_keys::Bool = false)
+    parse_json(text) = repeated_keys ? JSON.parse(text; dicttype = _JSONPairs) : JSON.parse(text)
     if isfile(input)
         @info "Loaded $description from file: $input"
-        return _parse_json_unique(read(input, String), "$description ($input)")
+        return parse_json(read(input, String))
     end
     endswith(lowercase(strip(input)), ".json") && error("$(uppercasefirst(description)) file not found: $(abspath(input))")
-    return _parse_json_unique(input, description)
+    return parse_json(input)
 end
 
 function _parse_arrival(item)
@@ -100,12 +87,17 @@ default_procurement_timelines()::Dict{String, Tuple{Int, Int}} =
 
 function parse_exogenous_builds(builds_input::AbstractString)::Union{Dict{String, Dict{Int, Float64}}, Nothing}
     isempty(builds_input) && return nothing
-    data = _read_json_input(builds_input, "exogenous builds")
+    data = _read_json_input(builds_input, "exogenous builds"; repeated_keys = true)
+    data isa AbstractDict || error("Exogenous builds must be a JSON object of technology => {\"year\": MW}")
+    # Repeated technologies or years add up, e.g. one entry per unit of a multi-unit candidate
     builds = Dict{String, Dict{Int, Float64}}()
     for (tech_name, year_mw) in data
-        builds[String(tech_name)] = Dict{Int, Float64}(
-            parse(Int, String(year)) => Float64(mw) for (year, mw) in year_mw
-        )
+        year_mw isa AbstractDict || error("Exogenous builds for $tech_name must be {\"year\": MW}")
+        years = get!(builds, String(tech_name), Dict{Int, Float64}())
+        for (year, mw) in year_mw
+            y = parse(Int, String(year))
+            years[y] = get(years, y, 0.0) + Float64(mw)
+        end
     end
     return builds
 end

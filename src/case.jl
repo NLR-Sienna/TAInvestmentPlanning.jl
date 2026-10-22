@@ -42,6 +42,22 @@ function load_case!(case_dir::AbstractString)
     return case
 end
 
+"""
+    set_candidate_overrides!(overrides = Dict())
+
+Apply candidate changes for the next runs on top of the active case's case.toml, without
+writing the file: `overrides` maps a candidate name to the fields to change, e.g.
+`Dict("Diesel_Wartsila_4300kW_Airport" => Dict("tier" => 2, "capacity_mw" => 4.4))`. Each call
+starts again from case.toml, so `set_candidate_overrides!()` restores the base settings.
+"""
+function set_candidate_overrides!(overrides::AbstractDict = Dict())
+    case = active_case()
+    _ACTIVE_CASE[] = ActiveCase(case.dir,
+        load_planning_settings(joinpath(case.dir, "case.toml"); candidate_overrides = overrides), case.mod)
+    isempty(overrides) || @info "Candidate overrides: $(join(["$n $(Dict(fields))" for (n, fields) in overrides], "; "))"
+    return settings()
+end
+
 function active_case()
     case = _ACTIVE_CASE[]
     isnothing(case) && error("No case loaded. Call TAInvestmentPlanning.load_case!(case_dir) first.")

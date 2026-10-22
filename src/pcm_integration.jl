@@ -313,10 +313,11 @@ function run_postoptimal_pcm(
     diesel_price::Float64 = case_default_diesel_price(),
     day_start::Int = 1,
     day_end::Int = 365,
+    year::Int = maximum(a.year for a in arrivals; init=settings().base_year),
 )
     # Build expanded system with new generators and load arrivals
     # (base system already has 13-year time series attached from build_case_system)
-    horizon_year = maximum(a.year for a in arrivals; init=settings().base_year)
+    horizon_year = year
     sys = build_post_investment_system(investment_results; arrivals=arrivals, diesel_price=diesel_price, year=horizon_year)
 
     # Debug: verify load arrivals are in the system

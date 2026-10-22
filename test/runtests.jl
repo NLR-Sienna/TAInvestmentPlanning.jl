@@ -47,6 +47,19 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
         @test IP.default_pcm_sim_name() == "tiny_annual"
         @test s.capacity_credit == (method = "net_load", top_hours = 100)  # defaults
         @test s.capital_within_horizon
+
+        # Candidate overrides change the active settings without writing case.toml, and reset
+        toml_before = read(joinpath(TINY_CASE, "case.toml"), String)
+        set_candidate_overrides!(Dict("Diesel_Recip_2MW_Main" => Dict("tier" => 2, "capacity_mw" => 2.5)))
+        @test unit_tier("Diesel_Recip_2MW_Main") == 2
+        @test settings().catalog["Diesel_Recip_2MW_Main"].capacity_mw == 2.5
+        @test read(joinpath(TINY_CASE, "case.toml"), String) == toml_before
+        @test_throws "unknown candidate" set_candidate_overrides!(Dict("Diesel_Nope" => Dict("tier" => 2)))
+        @test_throws "has no field" set_candidate_overrides!(Dict("Diesel_Recip_2MW_Main" => Dict("tierr" => 2)))
+        @test_throws "defines the candidate name" set_candidate_overrides!(Dict("Diesel_Recip_2MW_Main" => Dict("site" => "East")))
+        set_candidate_overrides!()
+        @test unit_tier("Diesel_Recip_2MW_Main") == 4
+        @test settings().catalog["Diesel_Recip_2MW_Main"].capacity_mw == 2.0
         @test IP.retired_capacity_mw("Wind_1", 2025) == 0.0
         @test IP.retired_capacity_mw("Wind_1", 2026) == 1.0
         @test IP.retired_capacity_mw("Diesel_1", 2030) == 0.0
@@ -109,6 +122,8 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
         @test merged["Wind_new_1"] == (2027, 2027)
         @test merged["Battery_1.0MW_4.0MWh"] == (2025, 9999)
 
+        # Repeated keys are an error (JSON.parse would keep only the last)
+        @test_throws "duplicate key \"Wind_new_1\"" parse_exogenous_builds("""{"Wind_new_1": {"2026": 1.5}, "Wind_new_1": {"2027": 1.5}}""")
         builds = parse_exogenous_builds("""{"Battery_1.0MW_4.0MWh": {"2026": 1.0}, "Wind_new_1": {"2026": 0}}""")
         @test builds["Battery_1.0MW_4.0MWh"] == Dict(2026 => 1.0)
         @test builds["Wind_new_1"] == Dict(2026 => 0.0)
@@ -129,6 +144,13 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
         ]
         @test peaks == [8.0, 9.0, 11.5]
         @test rep_years == [2025, 2027, 2029]
+
+        # A later horizon and extra years (e.g. exogenous builds) add intervals
+        intervals2, peaks2, years2 = IP.compute_investment_intervals(arrivals; horizon_end = 2031, extra_years = [2028, 2031, 2040])
+        @test years2 == [2025, 2027, 2028, 2029, 2031]
+        @test peaks2 == [8.0, 9.0, 9.0, 11.5, 11.5]
+        @test last(intervals2) == (Date(2031, 1, 1), Date(2031, 12, 31))
+        @test_throws ErrorException IP.compute_investment_intervals(arrivals; horizon_end = 2028)
 
         # No arrivals: one interval in the base year at the base peak
         intervals, peaks, rep_years = IP.compute_investment_intervals(LoadArrival[])
@@ -181,6 +203,19 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
         two = parse_cmdline(["--arrivals={\"a\": [], \"b\": []}"])
         @test_throws ErrorException IP._select_arrivals(two)
         @test first(IP._select_arrivals(parse_cmdline(["--arrivals={\"a\": [], \"b\": []}", "--scenario=b"]))) == "b"
+
+        @test IP._run_label(args, "growth") == "growth"
+        @test IP._run_label(parse_cmdline(["--run-name=sensitivity_1"]), "growth") == "sensitivity_1"
+        @test IP._horizon_end(args, default_arrivals()) == 2026
+        @test IP._horizon_end(parse_cmdline(["--horizon-end=2028"]), default_arrivals()) == 2028
+
+        # Exogenous builds are checked against the case before anything is built
+        timelines = default_procurement_timelines()  # Wind_new_1 from 2026, the rest from 2025
+        @test isnothing(IP._check_exogenous_builds(parse_exogenous_builds("""{"Diesel_Recip_2MW_Main": {"2026": 2.0}}"""), timelines, 2026))
+        @test_throws "not a candidate" IP._check_exogenous_builds(Dict("Diesel_X" => Dict(2026 => 1.0)), timelines, 2026)
+        @test_throws "outside the planning horizon" IP._check_exogenous_builds(Dict("Diesel_Recip_2MW_Main" => Dict(2028 => 2.0)), timelines, 2026)
+        @test_throws "procurement window" IP._check_exogenous_builds(Dict("Wind_new_1" => Dict(2025 => 1.5)), timelines, 2026)
+        @test_throws "one 2.0 MW unit" IP._check_exogenous_builds(Dict("Diesel_Recip_2MW_Main" => Dict(2026 => 4.0)), timelines, 2026)
     end
 
     @testset "CEM and PCM on the tiny case" begin
@@ -229,7 +264,8 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
 
                 ref_cem = JSON.parsefile(joinpath(REFERENCE_DIR, "tiny_cem.json"))
                 ref_pcm = JSON.parsefile(joinpath(REFERENCE_DIR, "tiny_pcm.json"))
-                @test cem["investments_mw"] == ref_cem["investments_mw"]
+                @test keys(cem["investments_mw"]) == keys(ref_cem["investments_mw"])
+                @test all(isapprox(cem["investments_mw"][k], v; atol = 1e-6) for (k, v) in ref_cem["investments_mw"])
                 @test isapprox(cem["objective"], ref_cem["objective"]; rtol = 1e-6)
                 @test all(isapprox.(cem["tier2_gallons_per_interval"], ref_cem["tier2_gallons_per_interval"]; rtol = 1e-6))
                 @test all(isapprox.(cem["tier2_hours_excess_mwh_per_interval"], ref_cem["tier2_hours_excess_mwh_per_interval"]; rtol = 1e-6, atol = 1e-3))

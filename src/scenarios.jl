@@ -9,13 +9,43 @@
     custom_profile_path::Union{String, Nothing} = nothing  # normalized (0-1) hourly profile for non-conforming loads
 end
 
+# JSON object that rejects repeated keys (JSON.parse would otherwise keep only the last one)
+struct _UniqueKeyDict <: AbstractDict{String, Any}
+    d::Dict{String, Any}
+end
+_UniqueKeyDict() = _UniqueKeyDict(Dict{String, Any}())
+function Base.setindex!(u::_UniqueKeyDict, v, k::AbstractString)
+    haskey(u.d, k) && throw(ArgumentError("duplicate key \"$k\""))
+    u.d[k] = v
+    return u
+end
+Base.getindex(u::_UniqueKeyDict, k) = u.d[k]
+Base.get(u::_UniqueKeyDict, k, default) = get(u.d, k, default)
+Base.haskey(u::_UniqueKeyDict, k) = haskey(u.d, k)
+Base.length(u::_UniqueKeyDict) = length(u.d)
+Base.iterate(u::_UniqueKeyDict, state...) = iterate(u.d, state...)
+
+_plain_json(x) = x
+_plain_json(x::_UniqueKeyDict) = Dict{String, Any}(k => _plain_json(v) for (k, v) in x.d)
+_plain_json(x::AbstractVector) = Any[_plain_json(v) for v in x]
+
+function _parse_json_unique(text::AbstractString, description::AbstractString)
+    try
+        return _plain_json(JSON.parse(text; dicttype = _UniqueKeyDict))
+    catch e
+        e isa ArgumentError && startswith(e.msg, "duplicate key") &&
+            error("$(uppercasefirst(description)) input has a $(e.msg); each key may appear once")
+        rethrow()
+    end
+end
+
 function _read_json_input(input::AbstractString, description::AbstractString)
     if isfile(input)
         @info "Loaded $description from file: $input"
-        return JSON.parse(read(input, String))
+        return _parse_json_unique(read(input, String), "$description ($input)")
     end
-    endswith(lowercase(strip(input)), ".json") && error("$(titlecase(description)) file not found: $(abspath(input))")
-    return JSON.parse(input)
+    endswith(lowercase(strip(input)), ".json") && error("$(uppercasefirst(description)) file not found: $(abspath(input))")
+    return _parse_json_unique(input, description)
 end
 
 function _parse_arrival(item)

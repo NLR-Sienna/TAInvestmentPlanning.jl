@@ -66,6 +66,15 @@ function _arg_settings()
             help = "CEM solver time limit in seconds (default: [solver] time_limit_s in case.toml)"
             arg_type = Float64
 
+        "--run-name"
+            help = "Name for this run's result folders and summaries (default: the load scenario name)"
+            default = ""
+            arg_type = String
+
+        "--horizon-end"
+            help = "Last planning year (default: the last load arrival year); exogenous build years start their own periods"
+            arg_type = Int
+
         "--copper-plate"
             help = "PCM: Use CopperPlate model (faster, no transmission) instead of NFAPowerModel"
             action = :store_true
@@ -145,6 +154,45 @@ parse_cmdline(args::AbstractVector{<:AbstractString} = ARGS) = parse_args(collec
 _diesel_price(args) = something(get(args, "diesel-price", nothing), case_default_diesel_price())
 _solver_time_limit(args) = Float64(something(get(args, "solver-time-limit", nothing), settings().time_limit_s))
 
+# Name for result folders and summaries: --run-name, else the load scenario name
+function _run_label(args, scenario_name)
+    name = get(args, "run-name", "")
+    return isnothing(name) || isempty(name) ? scenario_name : name
+end
+
+_horizon_end(args, arrivals) =
+    something(get(args, "horizon-end", nothing), maximum(a.year for a in arrivals; init = settings().base_year))
+
+# Check exogenous builds against the case before building anything: known candidate, build year in
+# the planning horizon and in the candidate's procurement window, and whole units for diesel and wind.
+function _check_exogenous_builds(builds, procurement_timelines, horizon_end::Int)
+    isnothing(builds) && return
+    problems = String[]
+    catalog = settings().catalog
+    timelines = something(procurement_timelines, default_procurement_timelines())
+    for (tech, year_mw) in builds, (year, mw) in year_mw
+        if !haskey(catalog, tech)
+            push!(problems, "$tech is not a candidate technology")
+            continue
+        end
+        settings().base_year <= year <= horizon_end ||
+            push!(problems, "$tech $year is outside the planning horizon $(settings().base_year)-$horizon_end (set --horizon-end)")
+        mw > 1e-6 || continue
+        first_year, last_year = get(timelines, tech, (typemin(Int), typemax(Int)))
+        first_year <= year <= last_year ||
+            push!(problems, "$tech $year is outside its procurement window $first_year-$last_year")
+        entry = catalog[tech]
+        if entry.kind in ("Diesel", "Wind") && !(any(a -> a.name == tech, settings().planned_additions))
+            abs(mw - entry.capacity_mw) <= 1e-6 ||
+                push!(problems, "$tech $year builds $mw MW; a build is one $(entry.capacity_mw) MW unit (or 0)")
+        elseif entry.kind == "Battery"
+            mw <= entry.power_mw + 1e-6 || push!(problems, "$tech $year builds $mw MW; at most $(entry.power_mw) MW")
+        end
+    end
+    isempty(problems) || error("Exogenous builds do not fit the case:\n  " * join(problems, "\n  "))
+    return
+end
+
 function _apply_slack_args!(args)
     set_slack_options!(;
         nodal = get(args, "enable-nodal-slack", true),
@@ -196,12 +244,16 @@ function _print_procurement_timelines(procurement_timelines)
     println()
 end
 
-function _build_portfolio(arrivals, procurement_timelines, diesel_price; verbose::Bool = true)
+function _build_portfolio(arrivals, procurement_timelines, diesel_price; verbose::Bool = true,
+                          horizon_end = nothing, exogenous_builds = nothing)
+    extra_years = isnothing(exogenous_builds) ? Int[] :
+        [year for year_mw in values(exogenous_builds) for (year, mw) in year_mw if mw > 1e-6]
     if isnothing(procurement_timelines)
-        return build_planning_portfolio(arrivals; verbose = verbose, diesel_price = diesel_price)
+        return build_planning_portfolio(arrivals; verbose = verbose, diesel_price = diesel_price,
+                                        horizon_end = horizon_end, extra_years = extra_years)
     end
     return build_planning_portfolio(arrivals; verbose = verbose, procurement_timelines = procurement_timelines,
-                                    diesel_price = diesel_price)
+                                    diesel_price = diesel_price, horizon_end = horizon_end, extra_years = extra_years)
 end
 
 # ============================================================================
@@ -353,18 +405,22 @@ function run_cem_workflow(args::Dict{String, Any})
     println()
 
     scenario_name, all_scenarios, arrivals = _select_arrivals(args)
+    label = _run_label(args, scenario_name)
     _print_arrivals(scenario_name, all_scenarios, arrivals)
 
     procurement_timelines = parse_procurement_timelines(args["procurement-timelines"])
     _print_procurement_timelines(procurement_timelines)
+    horizon_end = _horizon_end(args, arrivals)
+    exogenous_builds = parse_exogenous_builds(args["exogenous-builds"])
+    _check_exogenous_builds(exogenous_builds, procurement_timelines, horizon_end)
 
     println("Building multi-period nodal portfolio...")
-    port = _build_portfolio(arrivals, procurement_timelines, diesel_price)
+    port = _build_portfolio(arrivals, procurement_timelines, diesel_price;
+                            horizon_end = horizon_end, exogenous_builds = exogenous_builds)
 
     println("\nSolving capacity expansion optimization...")
     println("(This may take 60-180 seconds for multi-period co-optimization...)\n")
-    results_dir = joinpath("results", "planning", scenario_name)
-    exogenous_builds = parse_exogenous_builds(args["exogenous-builds"])
+    results_dir = joinpath("results", "planning", label)
     res = solve_planning(port; results_dir = results_dir, day_start = args["day-start"], day_end = args["day-end"],
                          mip_gap = args["mip-gap"], solver_time_limit = _solver_time_limit(args),
                          exogenous_builds = exogenous_builds,
@@ -635,9 +691,11 @@ function run_validation_workflow(args::Dict{String, Any})
 
     # Arrivals are needed for the PCM regardless of where the CEM results come from
     scenario_name, all_scenarios, arrivals = _select_arrivals(args)
-    scenario = Symbol(scenario_name)
+    label = _run_label(args, scenario_name)
+    scenario = Symbol(label)
+    horizon_end = _horizon_end(args, arrivals)
 
-    println("Scenario: $scenario")
+    println("Run: $label (load scenario: $scenario_name, horizon through $horizon_end)")
     println("PCM Optimality Gap: $(mip_gap*100)%")
     println("Diesel Price: \$$(diesel_price)/gal")
     println("PCM network model: $(use_copper_plate ? "CopperPlate" : "NFAPowerModel")\n")
@@ -663,14 +721,17 @@ function run_validation_workflow(args::Dict{String, Any})
 
         procurement_timelines = parse_procurement_timelines(args["procurement-timelines"])
         _print_procurement_timelines(procurement_timelines)
+        exogenous_builds = parse_exogenous_builds(args["exogenous-builds"])
+        _check_exogenous_builds(exogenous_builds, procurement_timelines, horizon_end)
 
-        portfolio = _build_portfolio(arrivals, procurement_timelines, diesel_price)
-        planning_dir = joinpath("results", "planning", scenario_name)
+        portfolio = _build_portfolio(arrivals, procurement_timelines, diesel_price;
+                                     horizon_end = horizon_end, exogenous_builds = exogenous_builds)
+        planning_dir = joinpath("results", "planning", label)
         cem_results_obj = solve_planning(portfolio;
                                          results_dir = planning_dir,
                                          day_start = args["day-start"], day_end = args["day-end"], mip_gap = mip_gap,
                                          solver_time_limit = _solver_time_limit(args),
-                                         exogenous_builds = parse_exogenous_builds(args["exogenous-builds"]),
+                                         exogenous_builds = exogenous_builds,
                                          fuel_cap = !args["disable-fuel-cap"],
                          tier2_hours = !get(args, "disable-tier2-hours", false), copper_plate = !args["nodal-cem"])
         inv_results = _extract_investment_results(cem_results_obj)
@@ -726,6 +787,7 @@ function run_validation_workflow(args::Dict{String, Any})
         diesel_price = diesel_price,
         day_start = args["day-start"],
         day_end = args["day-end"],
+        year = horizon_end,
     )
 
     # Step 4: Report PCM results

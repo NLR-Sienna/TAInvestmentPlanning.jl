@@ -171,9 +171,11 @@ function merge_procurement_timelines(overrides::Dict{String, Tuple{Int, Int}}) :
 end
 
 """
-    compute_investment_intervals(arrivals; base_year, horizon_end, base_load_mw)
+    compute_investment_intervals(arrivals; base_year, horizon_end, base_load_mw, extra_years)
 
-Derive investment intervals and per-interval peak demand from a load arrival schedule.
+Derive investment intervals and per-interval peak demand from a load arrival schedule. The horizon
+ends at the last arrival year unless `horizon_end` is later. Each arrival year and each of
+`extra_years` (e.g. exogenous build years) starts a new interval.
 
 Returns:
   - intervals: Vector{NTuple{2, Date}} for DiscountedCashFlow
@@ -185,9 +187,13 @@ function compute_investment_intervals(
     base_year::Int = settings().base_year,
     horizon_end::Int = maximum(a.year for a in arrivals; init=base_year),
     base_load_mw::Float64 = case_base_peak_load_mw(),
+    extra_years = Int[],
 )
-    # Boundary years: base_year, each arrival year, one past horizon
-    boundaries = [base_year; sort([a.year for a in arrivals]); horizon_end + 1]
+    last_arrival = maximum(a.year for a in arrivals; init=base_year)
+    horizon_end >= last_arrival || error("horizon_end $horizon_end is before the last load arrival ($last_arrival)")
+    # Boundary years: base_year, each arrival year and extra year in the horizon, one past horizon
+    starts = sort(unique([[a.year for a in arrivals]; [y for y in extra_years if base_year < y <= horizon_end]]))
+    boundaries = [base_year; starts; horizon_end + 1]
 
     intervals  = NTuple{2, Date}[]
     peak_mws   = Float64[]
@@ -310,9 +316,14 @@ function build_planning_portfolio(
     reserve_margin::Float64 = settings().reserve_margin,
     diesel_price::Float64 = case_default_diesel_price(),
     procurement_timelines::Dict{String, Tuple{Int, Int}} = default_procurement_timelines(),
+    horizon_end::Union{Nothing, Int} = nothing,
+    extra_years = Int[],
 )
-    # Compute investment intervals and per-interval peak demands from load arrivals
-    intervals, peak_mws, rep_years = compute_investment_intervals(arrivals)
+    # Compute investment intervals and per-interval peak demands from load arrivals. Planned
+    # additions and the given extra years (e.g. exogenous builds) start their own intervals.
+    last_year = something(horizon_end, maximum(a.year for a in arrivals; init=settings().base_year))
+    intervals, peak_mws, rep_years = compute_investment_intervals(arrivals; horizon_end = last_year,
+        extra_years = [extra_years; [a.year for a in settings().planned_additions]])
 
     # Build the underlying PowerSystems.System
     sys, _ = build_case_system(; diesel_price=diesel_price, verbose=false)
@@ -1739,8 +1750,8 @@ function _extract_investment_results(res::PSI2.OptimizationProblemResults)
             # Group by technology and sum across all time periods
             for tech in unique(build_df.technology)
                 tech_rows = build_df[build_df.technology .== tech, :]
-                total_val = sum(tech_rows.value)
-                results[tech] = total_val
+                # Round to 1e-6 MW so solver noise does not carry into the PCM and summaries
+                results[tech] = round(sum(tech_rows.value); digits = 6)
             end
         end
     end

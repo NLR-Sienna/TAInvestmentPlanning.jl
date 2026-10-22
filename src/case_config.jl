@@ -73,8 +73,38 @@ function _capacity_credit_settings(cfg::AbstractDict)
     return (method = method, top_hours = Int(get(cfg, "top_hours", 100)))
 end
 
-function load_planning_settings(path::AbstractString)
+# Override fields of candidates in the parsed case.toml: candidate name => Dict(field => value).
+# Only fields the candidate already has can be changed, and not the fields that make up its name.
+function _apply_candidate_overrides!(cfg::AbstractDict, overrides::AbstractDict)
+    isempty(overrides) && return cfg
+    entries = Dict{String, Dict}()
+    for b in cfg["candidates"]["battery"]
+        entries[battery_candidate_name(_nt(b))] = b
+    end
+    for d in cfg["candidates"]["diesel"]
+        entries[diesel_candidate_name(_nt(d))] = d
+    end
+    for w in cfg["candidates"]["wind"]
+        entries[w["name"]] = w
+    end
+    naming_fields = ("name", "site", "unit_name", "power_mw", "energy_mwh")
+    for (name, fields) in overrides
+        haskey(entries, name) ||
+            error("Candidate override for unknown candidate \"$name\". Candidates: $(join(sort(collect(keys(entries))), ", "))")
+        entry = entries[name]
+        for (field, value) in fields
+            field = String(field)
+            field in naming_fields && error("Cannot override \"$field\" of $name: it defines the candidate name")
+            haskey(entry, field) || error("Candidate $name has no field \"$field\" to override")
+            entry[field] = value
+        end
+    end
+    return cfg
+end
+
+function load_planning_settings(path::AbstractString; candidate_overrides::AbstractDict = Dict())
     cfg = TOML.parsefile(path)
+    _apply_candidate_overrides!(cfg, candidate_overrides)
     case_dir = dirname(abspath(path))
     candidates = load_candidates(cfg)
     planned_additions = [_nt(a) for a in get(cfg, "planned_additions", [])]

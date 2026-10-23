@@ -61,6 +61,11 @@ Scenario inputs are JSON files or JSON strings:
 | `--exogenous-builds` | `{"Tech_Name": {"2030": 4.0}}` (0 = do not build) | none |
 | `--diesel-price` | \$/gal | case default |
 | `--solver-time-limit` | CEM solver time limit, seconds | `[solver] time_limit_s` |
+| `--solver` | `highs` or `xpress` | `highs` |
+
+Xpress is optional: add Xpress.jl to the environment (`Pkg.add("Xpress"); Pkg.build("Xpress")`,
+with `XPRESSDIR` pointing to an Xpress installation and a full license; a Community license only
+solves problems of up to 5000 rows and columns). In Julia, `set_solver!("xpress")` selects it.
 
 ## Case directory
 
@@ -105,4 +110,5 @@ Pkg.test("TAInvestmentPlanning")
 
 The tests cover settings and scenario parsing, investment intervals, the CLI arguments, and a
 CEM → PCM run of the tiny case checked against `test/reference`. After an intended change in
-results, regenerate the references with `UPDATE_REFERENCE=true`.
+results, regenerate the references with `UPDATE_REFERENCE=true`. With Xpress installed and fully
+licensed, `TAIP_TEST_XPRESS=true` also solves the tiny CEM with Xpress.

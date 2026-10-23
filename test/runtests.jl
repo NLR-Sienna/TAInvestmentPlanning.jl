@@ -220,6 +220,13 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
         @test_throws "whole number of 2.0 MW units" IP._check_exogenous_builds(Dict("Diesel_Recip_2MW_Main" => Dict(2026 => 3.0)), timelines, 2026)
     end
 
+    @testset "Solver selection" begin
+        @test solver_name() == "highs"
+        @test_throws "Unknown solver" set_solver!("nosolver")
+        @test solver_name() == "highs"
+        @test IP._optimizer(; mip_gap = 0.01, time_limit = 10.0) isa IP.JuMP.MOI.OptimizerWithAttributes
+    end
+
     @testset "Multi-unit candidates" begin
         @test settings().catalog["Diesel_Recip_2MW_Main"].max_units == 1
         @test_throws "has no field \"max_units\"" set_candidate_overrides!(Dict("Wind_new_1" => Dict("max_units" => 2)))
@@ -322,6 +329,20 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
                     @test multi["investments_mw"]["Battery_1.0MW_4.0MWh"] ≈ 2.0
                 finally
                     set_candidate_overrides!()
+                end
+
+                # Xpress, where it is installed with a full license, finds the same plan within the gap
+                # (the tiny CEM is over the size limit of an Xpress Community license)
+                if !isnothing(Base.find_package("Xpress")) && get(ENV, "TAIP_TEST_XPRESS", "false") == "true"
+                    try
+                        run_cem_workflow(parse_cmdline(["cem", "--day-start=1", "--day-end=2", "--mip-gap=0.01",
+                                                        "--solver=xpress", "--run-name=xpress"]))
+                        @test solver_name() == "xpress"
+                        xpress = JSON.parsefile(joinpath("results", "planning", "xpress", "summary.json"))
+                        @test isapprox(xpress["objective"], cem["objective"]; rtol = 0.01)
+                    finally
+                        set_solver!("highs")
+                    end
                 end
 
                 ref_cem = JSON.parsefile(joinpath(REFERENCE_DIR, "tiny_cem.json"))

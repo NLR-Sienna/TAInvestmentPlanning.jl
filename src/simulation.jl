@@ -26,7 +26,7 @@
 #   PowerLoad              → StaticPowerLoad
 #     Fixed inelastic demand (no demand response)
 #
-# Solver: HiGHS (open-source MILP)
+# Solver: HiGHS (open-source MILP) by default; see set_solver!
 #   Commercial solvers (Gurobi, CPLEX) can be substituted for speed.
 
 # ---------------------------------------------------------------------------
@@ -124,13 +124,7 @@ function build_pcm_simulation(
         template,
         sys;
         name      = "UC",
-        optimizer = optimizer_with_attributes(
-            HiGHS.Optimizer,
-            "mip_rel_gap"  => mip_gap,
-            "time_limit"   => solver_time_limit,
-            "output_flag"  => false,
-            "log_to_console" => false,
-        ),
+        optimizer = _optimizer(; mip_gap = mip_gap, time_limit = solver_time_limit),
         horizon    = Hour(48),
         resolution = Hour(1),
         warm_start = true,
@@ -186,7 +180,7 @@ function run_simulation!(sim :: PSI.Simulation; serialize :: Bool = false)
     status = PSI.build!(sim)
 
     @info "Executing annual simulation: 364 daily UC problems, each with 24h horizon."
-    @info "Estimated runtime: 10–60 minutes (solver: HiGHS)"
+    @info "Estimated runtime: 10–60 minutes (solver: $(solver_name()))"
 
     PSI.execute!(sim; enable_progress_bar = true)
 
@@ -218,11 +212,7 @@ function run_single_day_test(
         template,
         sys;
         name      = "UC_test",
-        optimizer = optimizer_with_attributes(
-            HiGHS.Optimizer,
-            "mip_rel_gap"    => 0.01,
-            "output_flag"    => true,
-        ),
+        optimizer = _optimizer(; mip_gap = 0.01, silent = false),
         horizon    = Hour(24),
         resolution = Hour(1),
     )

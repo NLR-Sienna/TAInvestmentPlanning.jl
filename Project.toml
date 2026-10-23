@@ -29,6 +29,12 @@ StorageSystemsSimulations = "e2f1a126-19d0-4674-9252-42b2384f8e3c"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 TimeSeries = "9e3dc215-6440-5c97-bce1-76c03772f85e"
 
+[weakdeps]
+Xpress = "9e70acf3-d6c9-5be6-b5bd-4e2c73e3e054"
+
+[extensions]
+TAInvestmentPlanningXpressExt = "Xpress"
+
 [sources]
 # PowerSystemsInvestments shares its UUID with the registered HybridSystemsSimulations package, so it
 # must always come from this source; without it Pkg resolves the UUID to HybridSystemsSimulations.
@@ -61,6 +67,7 @@ Statistics = "1"
 StorageSystemsSimulations = "0.15"
 TOML = "1"
 TimeSeries = "0.25"
+Xpress = "0.17, 0.18"
 julia = "1.11"
 
 [extras]

@@ -1181,13 +1181,7 @@ function solve_planning(
         template,
         PSI2.SingleInstanceSolve,
         portfolio;
-        optimizer = optimizer_with_attributes(
-            HiGHS.Optimizer,
-            "mip_rel_gap"  => mip_gap,
-            "time_limit"   => solver_time_limit,
-            "output_flag"  => false,
-            "log_to_console" => false,
-        ),
+        optimizer = _optimizer(; mip_gap = mip_gap, time_limit = solver_time_limit),
         store_variable_names = true,
         portfolio_to_file = false,
         output_dir = results_dir,

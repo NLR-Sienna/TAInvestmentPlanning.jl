@@ -66,6 +66,11 @@ function _arg_settings()
             help = "CEM solver time limit in seconds (default: [solver] time_limit_s in case.toml)"
             arg_type = Float64
 
+        "--solver"
+            help = "MILP solver for the CEM and PCM: highs or xpress (needs Xpress.jl in the environment and an Xpress license)"
+            default = "highs"
+            arg_type = String
+
         "--run-name"
             help = "Name for this run's result folders and summaries (default: the load scenario name)"
             default = ""
@@ -208,6 +213,12 @@ function _check_exogenous_builds(builds, procurement_timelines, horizon_end::Int
     return
 end
 
+function _apply_solver_arg!(args)
+    solver = set_solver!(get(args, "solver", "highs"))
+    println("Solver: $solver")
+    return solver
+end
+
 function _apply_slack_args!(args)
     set_slack_options!(;
         nodal = get(args, "enable-nodal-slack", true),
@@ -280,6 +291,7 @@ function run_pcm_workflow(args::Dict{String, Any})
     println("PRODUCTION COST SIMULATION (Base System)")
     println("="^70 * "\n")
 
+    _apply_solver_arg!(args)
     TEST_MODE = args["test"]
     SKIP_SIM = args["analyze-only"]
     MIP_GAP = args["mip-gap"]
@@ -408,6 +420,7 @@ function run_cem_workflow(args::Dict{String, Any})
     println("CAPACITY EXPANSION MODEL (Multi-Period Planning Optimization)")
     println("="^70 * "\n")
 
+    _apply_solver_arg!(args)
     slacks = _apply_slack_args!(args)
     diesel_price = _diesel_price(args)
 
@@ -462,6 +475,7 @@ function run_battery_comparison_workflow(args::Dict{String, Any})
     println("BATTERY COMPARISON: CEM → PCM (baseline) → PCM (multiple battery sizes)")
     println("="^70 * "\n")
 
+    _apply_solver_arg!(args)
     _apply_slack_args!(args)
     mip_gap = args["mip-gap"]
     diesel_price = _diesel_price(args)
@@ -699,6 +713,7 @@ function run_validation_workflow(args::Dict{String, Any})
     println("VALIDATION WORKFLOW: Capacity Expansion → Production Cost Simulation")
     println("="^70 * "\n")
 
+    _apply_solver_arg!(args)
     _apply_slack_args!(args)
     mip_gap = args["mip-gap"]
     diesel_price = _diesel_price(args)
@@ -838,6 +853,7 @@ function run_uncertainty_workflow(args::Dict{String, Any})
     println("="^70 * "\n")
 
     @info "Running CEM for multi-period load arrival scenarios..."
+    _apply_solver_arg!(args)
     _apply_slack_args!(args)
 
     # All scenarios in the arrivals input, or only the one given with --scenario

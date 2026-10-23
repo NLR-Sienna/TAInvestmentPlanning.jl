@@ -54,6 +54,7 @@ const IS = InfrastructureSystems
 
 include("case_config.jl")
 include("case.jl")
+include("solvers.jl")
 include("scenarios.jl")
 include("simulation.jl")
 include("analyze_results.jl")
@@ -73,7 +74,7 @@ export parse_exogenous_builds
 
 # Capacity expansion
 export build_planning_portfolio, solve_planning, report_planning_results, last_capacity_plot
-export set_slack_options!
+export set_slack_options!, set_solver!, solver_name
 
 # Production cost
 export build_uc_template, build_pcm_simulation, run_simulation!, run_single_day_test

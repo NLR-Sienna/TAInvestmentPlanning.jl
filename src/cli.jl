@@ -286,12 +286,11 @@ end
 # Production Cost Simulation (PCM) Workflow
 # ============================================================================
 
-function run_pcm_workflow(args::Dict{String, Any})
+function _pcm_workflow(args::Dict{String, Any})
     println("\n" * "="^70)
     println("PRODUCTION COST SIMULATION (Base System)")
     println("="^70 * "\n")
 
-    _apply_solver_arg!(args)
     TEST_MODE = args["test"]
     SKIP_SIM = args["analyze-only"]
     MIP_GAP = args["mip-gap"]
@@ -415,12 +414,11 @@ end
 # Capacity Expansion Model (CEM) Workflow
 # ============================================================================
 
-function run_cem_workflow(args::Dict{String, Any})
+function _cem_workflow(args::Dict{String, Any})
     println("\n" * "="^70)
     println("CAPACITY EXPANSION MODEL (Multi-Period Planning Optimization)")
     println("="^70 * "\n")
 
-    _apply_solver_arg!(args)
     slacks = _apply_slack_args!(args)
     diesel_price = _diesel_price(args)
 
@@ -470,12 +468,11 @@ end
 # Battery Comparison Workflow: CEM → PCM (no battery) → PCM (with battery)
 # ============================================================================
 
-function run_battery_comparison_workflow(args::Dict{String, Any})
+function _battery_comparison_workflow(args::Dict{String, Any})
     println("\n" * "="^70)
     println("BATTERY COMPARISON: CEM → PCM (baseline) → PCM (multiple battery sizes)")
     println("="^70 * "\n")
 
-    _apply_solver_arg!(args)
     _apply_slack_args!(args)
     mip_gap = args["mip-gap"]
     diesel_price = _diesel_price(args)
@@ -708,12 +705,11 @@ end
 # Validation Workflow: CEM → PCM
 # ============================================================================
 
-function run_validation_workflow(args::Dict{String, Any})
+function _validation_workflow(args::Dict{String, Any})
     println("\n" * "="^70)
     println("VALIDATION WORKFLOW: Capacity Expansion → Production Cost Simulation")
     println("="^70 * "\n")
 
-    _apply_solver_arg!(args)
     _apply_slack_args!(args)
     mip_gap = args["mip-gap"]
     diesel_price = _diesel_price(args)
@@ -847,13 +843,12 @@ end
 # Uncertainty Analysis Workflow
 # ============================================================================
 
-function run_uncertainty_workflow(args::Dict{String, Any})
+function _uncertainty_workflow(args::Dict{String, Any})
     println("\n" * "="^70)
     println("UNCERTAINTY ANALYSIS: Multi-Scenario Sensitivity")
     println("="^70 * "\n")
 
     @info "Running CEM for multi-period load arrival scenarios..."
-    _apply_solver_arg!(args)
     _apply_slack_args!(args)
 
     # All scenarios in the arrivals input, or only the one given with --scenario
@@ -940,6 +935,19 @@ end
 # ============================================================================
 # Main Entry Point
 # ============================================================================
+
+# Each workflow selects its solver, then runs in the latest world: a solver package that set_solver!
+# loads at run time (Xpress) has methods that code already running cannot call
+function _with_solver(workflow, args::Dict{String, Any})
+    _apply_solver_arg!(args)
+    return Base.invokelatest(workflow, args)
+end
+
+run_pcm_workflow(args::Dict{String, Any}) = _with_solver(_pcm_workflow, args)
+run_cem_workflow(args::Dict{String, Any}) = _with_solver(_cem_workflow, args)
+run_battery_comparison_workflow(args::Dict{String, Any}) = _with_solver(_battery_comparison_workflow, args)
+run_validation_workflow(args::Dict{String, Any}) = _with_solver(_validation_workflow, args)
+run_uncertainty_workflow(args::Dict{String, Any}) = _with_solver(_uncertainty_workflow, args)
 
 const WORKFLOWS = Dict(
     "pcm" => run_pcm_workflow,

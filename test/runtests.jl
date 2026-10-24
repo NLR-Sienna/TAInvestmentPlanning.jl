@@ -225,6 +225,24 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
         @test_throws "Unknown solver" set_solver!("nosolver")
         @test solver_name() == "highs"
         @test IP._optimizer(; mip_gap = 0.01, time_limit = 10.0) isa IP.JuMP.MOI.OptimizerWithAttributes
+
+        # Xpress loaded by set_solver! while code is running: workflows run in the latest world so
+        # they can call it (a small model, within an Xpress Community license)
+        if !isnothing(Base.find_package("Xpress"))
+            function small_solve(args)
+                m = IP.JuMP.Model(IP._optimizer(; mip_gap = 0.01, time_limit = 10.0))
+                IP.JuMP.@variable(m, x[1:3], Bin)
+                IP.JuMP.@objective(m, Max, sum(x))
+                IP.JuMP.@constraint(m, sum(x) <= 2)
+                IP.JuMP.optimize!(m)
+                return IP.JuMP.objective_value(m)
+            end
+            try
+                @test IP._with_solver(small_solve, Dict{String, Any}("solver" => "xpress")) ≈ 2.0
+            finally
+                set_solver!("highs")
+            end
+        end
     end
 
     @testset "Multi-unit candidates" begin

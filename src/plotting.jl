@@ -202,9 +202,11 @@ function plot_pcm_results(pcm_results::Dict; output_dir::String="results/plots")
         end
 
         if !isnothing(fuel_plot)
-            fuel_plot_path = joinpath(output_dir, "fuel_generation_$(scenario).png")
+            fuel_plot_path = joinpath(output_dir, "fuel_generation_$(scenario)")
             try
-                PG.save_plot(fuel_plot, fuel_plot_path)
+                PG.save_plot(fuel_plot, fuel_plot_path * ".png")
+                PG.save_plot(fuel_plot, fuel_plot_path * ".html")
+                PG.save_plot(fuel_plot, fuel_plot_path * ".svg")
                 @info "  ✓ Fuel plot saved: $fuel_plot_path"
             catch e
                 @warn "Failed to save fuel plot: $e"
@@ -221,9 +223,11 @@ function plot_pcm_results(pcm_results::Dict; output_dir::String="results/plots")
         end
 
         if !isnothing(pg_fuel_plot)
-            pg_fuel_plot_path = joinpath(output_dir, "pg_fuel_$(scenario).png")
+            pg_fuel_plot_path = joinpath(output_dir, "pg_fuel_$(scenario)")
             try
-                PG.save_plot(pg_fuel_plot, pg_fuel_plot_path)
+                PG.save_plot(pg_fuel_plot, pg_fuel_plot_path * ".png")
+                PG.save_plot(pg_fuel_plot, pg_fuel_plot_path * ".html")
+                PG.save_plot(pg_fuel_plot, pg_fuel_plot_path * ".svg")
                 @info "  ✓ PowerGraphics fuel plot saved: $pg_fuel_plot_path"
             catch e
                 @warn "Failed to save PowerGraphics fuel plot: $e"
@@ -240,9 +244,11 @@ function plot_pcm_results(pcm_results::Dict; output_dir::String="results/plots")
         end
 
         if !isnothing(gen_plot)
-            gen_plot_path = joinpath(output_dir, "generation_$(scenario).png")
+            gen_plot_path = joinpath(output_dir, "generation_$(scenario)")
             try
-                PG.save_plot(gen_plot, gen_plot_path)
+                PG.save_plot(gen_plot, gen_plot_path * ".png")
+                PG.save_plot(gen_plot, gen_plot_path * ".html")
+                PG.save_plot(gen_plot, gen_plot_path * ".svg")
                 @info "  ✓ Generation plot saved: $gen_plot_path"
             catch e
                 @warn "Failed to save generation plot: $e"
@@ -259,9 +265,11 @@ function plot_pcm_results(pcm_results::Dict; output_dir::String="results/plots")
         end
 
         if !isnothing(demand_plot)
-            demand_plot_path = joinpath(output_dir, "demand_$(scenario).png")
+            demand_plot_path = joinpath(output_dir, "demand_$(scenario)")
             try
-                PG.save_plot(demand_plot, demand_plot_path)
+                PG.save_plot(demand_plot, demand_plot_path * ".png")
+                PG.save_plot(demand_plot, demand_plot_path * ".html")
+                PG.save_plot(demand_plot, demand_plot_path * ".svg")
                 @info "  ✓ Demand plot saved: $demand_plot_path"
             catch e
                 @warn "Failed to save demand plot: $e"

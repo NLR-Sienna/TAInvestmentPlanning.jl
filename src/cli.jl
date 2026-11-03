@@ -35,9 +35,13 @@ function _arg_settings()
             arg_type = String
 
         "--cem-results"
-            help = "Path to prior CEM results JSON (skip CEM re-run)"
+            help = "validate: prior CEM results (cem_results.json or its results/planning/<run> folder); runs the PCM only"
             default = ""
             arg_type = String
+
+        "--pcm-year"
+            help = "validate: PCM year in the planning horizon; the system has the builds, load arrivals, and retirements of that year (default: horizon end)"
+            arg_type = Int
 
         "--test"
             help = "PCM: Single-day test solve (day 180)"
@@ -211,6 +215,29 @@ function _check_exogenous_builds(builds, procurement_timelines, horizon_end::Int
     end
     isempty(problems) || error("Exogenous builds do not fit the case:\n  " * join(problems, "\n  "))
     return
+end
+
+# cem_results.json given directly or as its results/planning/<run> folder
+function _cem_results_path(input::AbstractString)
+    path = isdir(input) ? joinpath(input, "cem_results.json") : input
+    isfile(path) || error("CEM results not found: $(abspath(path))")
+    return path
+end
+
+# investments_by_year from a CEM results file ({"tech": {"year": MW}}), or nothing if not recorded
+_parse_investments_by_year(data) = isnothing(data) ? nothing :
+    Dict{String, Dict{Int, Float64}}(String(tech) => Dict(parse(Int, string(y)) => Float64(mw) for (y, mw) in builds)
+                                     for (tech, builds) in data)
+
+# PCM year (--pcm-year, default the CEM horizon end), the MW built by then, and the load arrivals present
+function _pcm_year_inputs(args, cem_horizon::Int, inv_results, by_year, arrivals)
+    pcm_year = something(get(args, "pcm-year", nothing), cem_horizon)
+    settings().base_year <= pcm_year <= cem_horizon ||
+        error("--pcm-year=$pcm_year is outside the CEM horizon $(settings().base_year)-$cem_horizon")
+    pcm_year == cem_horizon && return pcm_year, inv_results, arrivals
+    isnothing(by_year) && error("These CEM results do not record the build years (saved before --pcm-year existed); " *
+                                "rerun the CEM to run a PCM for $pcm_year")
+    return pcm_year, installed_by_year(by_year, pcm_year), filter(a -> a.year <= pcm_year, arrivals)
 end
 
 function _apply_solver_arg!(args)
@@ -733,15 +760,15 @@ function _validation_workflow(args::Dict{String, Any})
     portfolio = nothing
     inv_results = Dict()
 
-    if !isempty(args["cem-results"]) && isfile(args["cem-results"])
-        @info "Loading CEM results from $(args["cem-results"])"
-        try
-            cem_json = JSON.parsefile(args["cem-results"])
-            inv_results = Dict{String, Float64}(k => Float64(v) for (k, v) in get(cem_json, "investment_decisions", Dict()))
-        catch e
-            @warn "Could not load CEM results: $e"
-            inv_results = Dict()
-        end
+    by_year = nothing           # tech => Dict(year => MW) of builds by the year they come online
+    cem_horizon = horizon_end   # last year of the CEM horizon
+    if !isempty(args["cem-results"])
+        cem_path = _cem_results_path(args["cem-results"])
+        @info "Loading CEM results from $cem_path"
+        cem_json = JSON.parsefile(cem_path)
+        inv_results = Dict{String, Float64}(k => Float64(v) for (k, v) in get(cem_json, "investment_decisions", Dict()))
+        by_year = _parse_investments_by_year(get(cem_json, "investments_by_year", nothing))
+        cem_horizon = get(cem_json, "horizon_end", horizon_end)
     else
         @info "Running CEM first..."
 
@@ -761,13 +788,16 @@ function _validation_workflow(args::Dict{String, Any})
                                          fuel_cap = !args["disable-fuel-cap"],
                          tier2_hours = !get(args, "disable-tier2-hours", false), copper_plate = !args["nodal-cem"])
         inv_results = _extract_investment_results(cem_results_obj)
+        by_year = _investments_by_year(cem_results_obj, portfolio)
+        cem_horizon = _horizon_end_year(portfolio)
         _write_planning_summary(cem_results_obj, portfolio, joinpath(planning_dir, "summary.json"))
 
         # Save CEM results
         cem_json_path = joinpath(planning_dir, "cem_results.json")
         mkpath(dirname(cem_json_path))
         open(cem_json_path, "w") do f
-            JSON.print(f, Dict("scenario" => scenario, "investment_decisions" => inv_results))
+            JSON.print(f, Dict("scenario" => scenario, "investment_decisions" => inv_results,
+                               "investments_by_year" => by_year, "horizon_end" => cem_horizon))
         end
         @info "CEM results saved → $cem_json_path"
     end
@@ -793,27 +823,31 @@ function _validation_workflow(args::Dict{String, Any})
         end
     end
 
-    # Step 3: Run PCM on post-investment system
-    println("\nStep 2: Post-Investment System PCM")
+    # Step 3: Run PCM on post-investment system in the PCM year: builds online, load arrivals present,
+    # and retirements by then. Results for a year before the horizon end are named <run>_<year>.
+    pcm_year, pcm_builds, pcm_arrivals = _pcm_year_inputs(args, cem_horizon, inv_results, by_year, arrivals)
+    pcm_scenario = pcm_year == cem_horizon ? scenario : Symbol("$(label)_$(pcm_year)")
+    println("\nStep 2: Post-Investment System PCM ($pcm_year)")
     println("="^70)
-    println("  Candidate technologies built:")
-    for (tech_name, cap) in sort(inv_results)
+    println("  Candidate technologies built by $pcm_year:")
+    for (tech_name, cap) in sort(pcm_builds)
         if cap > 0.1
             println("    ✓ $tech_name: $(round(cap, digits=2)) MW")
         end
     end
+    println("  Load arrivals by $pcm_year: $(length(pcm_arrivals)) of $(length(arrivals))")
 
     pcm_results = run_postoptimal_pcm(
-        inv_results;
-        scenario = scenario,
+        pcm_builds;
+        scenario = pcm_scenario,
         results_dir = joinpath("results", "pcm"),
         mip_gap = mip_gap,
         copper_plate = use_copper_plate,
-        arrivals = arrivals,
+        arrivals = pcm_arrivals,
         diesel_price = diesel_price,
         day_start = args["day-start"],
         day_end = args["day-end"],
-        year = horizon_end,
+        year = pcm_year,
     )
 
     # Step 4: Report PCM results
@@ -824,15 +858,15 @@ function _validation_workflow(args::Dict{String, Any})
     # Step 5: Generate plots
     println("\nStep 4: Generating plots...")
     println("="^70)
-    plot_dir = joinpath("results", "plots", "validation_$(scenario)")
+    plot_dir = joinpath("results", "plots", "validation_$(pcm_scenario)")
     plot_pcm_results(pcm_results; output_dir = plot_dir)
     # Print PCM results to terminal
     all_results = analyze_results(pcm_results; diesel_price = diesel_price)
-    write_pcm_summary(all_results, joinpath("results", "pcm", "pcm_summary_$(scenario).json"))
+    write_pcm_summary(all_results, joinpath("results", "pcm", "pcm_summary_$(pcm_scenario).json"))
 
     println("="^70)
     println("✓ Validation workflow complete")
-    println("CEM results:  results/planning/$(scenario)/")
+    println("CEM results:  results/planning/$(label)/")
     println("PCM results:  $(pcm_results["results_dir"])/")
     println("Plots saved:  $plot_dir")
     println("="^70 * "\n")

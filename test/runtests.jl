@@ -245,6 +245,22 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
         end
     end
 
+    @testset "PCM year inputs" begin
+        by_year = Dict("Wind_new_1" => Dict(2026 => 1.5), "Battery_1.0MW_4.0MWh" => Dict(2025 => 0.5, 2027 => 0.5))
+        @test installed_by_year(by_year, 2025) == Dict("Wind_new_1" => 0.0, "Battery_1.0MW_4.0MWh" => 0.5)
+        @test installed_by_year(by_year, 2027) == Dict("Wind_new_1" => 1.5, "Battery_1.0MW_4.0MWh" => 1.0)
+        @test IP._parse_investments_by_year(Dict("Wind_new_1" => Dict("2026" => 1.5))) == Dict("Wind_new_1" => Dict(2026 => 1.5))
+
+        arrivals = [LoadArrival(; year = 2026, mw = 4.0, conforming = false, bus = "East")]
+        totals = Dict("Wind_new_1" => 1.5, "Battery_1.0MW_4.0MWh" => 1.0)
+        # Default: the horizon end, with every build and arrival
+        @test IP._pcm_year_inputs(Dict{String, Any}(), 2027, totals, by_year, arrivals) == (2027, totals, arrivals)
+        year, builds, present = IP._pcm_year_inputs(Dict{String, Any}("pcm-year" => 2025), 2027, totals, by_year, arrivals)
+        @test (year, builds, present) == (2025, installed_by_year(by_year, 2025), LoadArrival[])
+        @test_throws "outside the CEM horizon" IP._pcm_year_inputs(Dict{String, Any}("pcm-year" => 2028), 2027, totals, by_year, arrivals)
+        @test_throws "do not record the build years" IP._pcm_year_inputs(Dict{String, Any}("pcm-year" => 2025), 2027, totals, nothing, arrivals)
+    end
+
     @testset "Multi-unit candidates" begin
         @test settings().catalog["Diesel_Recip_2MW_Main"].max_units == 1
         @test_throws "has no field \"max_units\"" set_candidate_overrides!(Dict("Wind_new_1" => Dict("max_units" => 2)))
@@ -326,6 +342,18 @@ const UPDATE_REFERENCE = get(ENV, "UPDATE_REFERENCE", "false") == "true"
                     cp(joinpath("results", "pcm", "pcm_summary_growth.json"), joinpath(REFERENCE_DIR, "tiny_pcm.json"); force = true)
                     @info "Updated tiny-case references in $REFERENCE_DIR"
                 end
+
+                # The CEM records when each build comes online
+                @test cem["horizon_end"] == 2026
+                @test IP._parse_investments_by_year(cem["investments_by_year"]) isa Dict{String, Dict{Int, Float64}}
+                @test all(isapprox(sum(values(IP._parse_investments_by_year(cem["investments_by_year"])[k]); init = 0.0),
+                                   v; atol = 0.02) for (k, v) in cem["investments_mw"])
+
+                # PCM of 2025 from the saved CEM: no 2026 load arrival, only builds online in 2025
+                run_validation_workflow(parse_cmdline(["validate", "--day-start=1", "--day-end=2", "--mip-gap=0.01",
+                                                       "--cem-results=results/planning/growth", "--pcm-year=2025"]))
+                pcm_2025 = JSON.parsefile(joinpath("results", "pcm", "pcm_summary_growth_2025.json"))
+                @test isapprox(pcm_2025["total_mwh"], 8.0 * 0.65 * 48; rtol = 0.02)
 
                 # A forced build of a binary candidate fixes both its MW and its 0/1 build decision
                 run_cem_workflow(parse_cmdline(["cem", "--day-start=1", "--day-end=2",

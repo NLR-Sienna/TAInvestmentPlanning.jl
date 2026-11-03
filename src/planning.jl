@@ -1436,6 +1436,26 @@ function _apply_tier2_hours_limit!(model::PSI2.InvestmentModel, portfolio::PSIP.
     return
 end
 
+# Builds by technology and the year they come online (the start year of their investment interval):
+# tech => Dict(year => MW)
+function _investments_by_year(res::PSI2.OptimizationProblemResults, port::PSIP.Portfolio)
+    data = _PORTFOLIO_INTERVAL_DATA[objectid(port)]
+    by_interval = _extract_investment_by_interval(res, data.intervals, data.rep_years)
+    return Dict{String, Dict{Int, Float64}}(
+        tech => Dict(year => round(mw; digits = 6) for (year, mw) in builds) for (tech, builds) in by_interval)
+end
+
+# Last year of the planning horizon
+_horizon_end_year(port::PSIP.Portfolio) = Dates.year(_PORTFOLIO_INTERVAL_DATA[objectid(port)].intervals[end][2])
+
+"""
+    installed_by_year(investments_by_year, year) -> Dict{String, Float64}
+
+MW of each technology built by `year` (builds that come online in or before it).
+"""
+installed_by_year(investments_by_year::AbstractDict, year::Integer) = Dict{String, Float64}(
+    tech => sum(Float64(mw) for (y, mw) in builds if y <= year; init = 0.0) for (tech, builds) in investments_by_year)
+
 function _write_planning_summary(res::PSI2.OptimizationProblemResults, port::PSIP.Portfolio, path::String)
     container = PSI2.get_optimization_container(res.model)
     jm = PSI2.get_jump_model(container)
@@ -1444,6 +1464,8 @@ function _write_planning_summary(res::PSI2.OptimizationProblemResults, port::PSI
     summary = Dict(
         "objective" => JuMP.objective_value(jm),
         "investments_mw" => _extract_investment_results(res),
+        "investments_by_year" => _investments_by_year(res, port),
+        "horizon_end" => _horizon_end_year(port),
         "tier2_gallons_per_interval" => isnothing(t2) ? nothing : t2.gallons,
         "tier2_slack_gallons_per_interval" => isnothing(t2) ? nothing : t2.slack,
         "tier2_hours_excess_mwh_per_interval" => isnothing(hours) ? nothing :

@@ -73,7 +73,7 @@ export parse_procurement_timelines, default_procurement_timelines, merge_procure
 export parse_exogenous_builds
 
 # Capacity expansion
-export build_planning_portfolio, solve_planning, report_planning_results, last_capacity_plot
+export build_planning_portfolio, solve_planning, report_planning_results, last_capacity_plot, installed_by_year
 export set_slack_options!, set_solver!, solver_name
 
 # Production cost

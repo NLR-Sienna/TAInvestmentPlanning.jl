@@ -114,6 +114,10 @@ function _arg_settings()
             help = "Disable the per-unit Tier 2 operating hours limit in the CEM (set in case.toml)"
             action = :store_true
 
+        "--disable-hydro-energy"
+            help = "Disable the hydro reservoir energy limit in the CEM (inflow from the reservoir's inflow time series)"
+            action = :store_true
+
         "--exogenous-builds"
             help = "JSON file or string with fixed builds in MW per year: {\"Tech_Name\": {\"2030\": 4.0}, ...} (0 = do not build)"
             default = ""
@@ -478,7 +482,8 @@ function _cem_workflow(args::Dict{String, Any})
                          mip_gap = args["mip-gap"], solver_time_limit = _solver_time_limit(args),
                          exogenous_builds = exogenous_builds,
                          fuel_cap = !args["disable-fuel-cap"],
-                         tier2_hours = !get(args, "disable-tier2-hours", false), copper_plate = !args["nodal-cem"])
+                         tier2_hours = !get(args, "disable-tier2-hours", false),
+                         hydro_energy = !get(args, "disable-hydro-energy", false), copper_plate = !args["nodal-cem"])
 
     println("\nReporting investment results...")
     report_planning_results(res, port)
@@ -786,7 +791,8 @@ function _validation_workflow(args::Dict{String, Any})
                                          solver_time_limit = _solver_time_limit(args),
                                          exogenous_builds = exogenous_builds,
                                          fuel_cap = !args["disable-fuel-cap"],
-                         tier2_hours = !get(args, "disable-tier2-hours", false), copper_plate = !args["nodal-cem"])
+                         tier2_hours = !get(args, "disable-tier2-hours", false),
+                         hydro_energy = !get(args, "disable-hydro-energy", false), copper_plate = !args["nodal-cem"])
         inv_results = _extract_investment_results(cem_results_obj)
         by_year = _investments_by_year(cem_results_obj, portfolio)
         cem_horizon = _horizon_end_year(portfolio)

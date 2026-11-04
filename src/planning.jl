@@ -1158,6 +1158,7 @@ function solve_planning(
     exogenous_builds::Union{Nothing, Dict{String, Dict{Int, Float64}}} = nothing,
     fuel_cap::Bool = true,
     tier2_hours::Bool = true,
+    hydro_energy::Bool = true,
     copper_plate::Bool = true,
 )
     # Convert to absolute path to ensure serialized files go to correct location
@@ -1233,6 +1234,10 @@ function solve_planning(
 
         if tier2_hours
             _apply_tier2_hours_limit!(model, portfolio)
+        end
+
+        if hydro_energy
+            _apply_hydro_energy_limits!(model, portfolio)
         end
 
         settings().capital_within_horizon && _limit_capital_to_horizon!(model, portfolio)
@@ -1436,6 +1441,101 @@ function _apply_tier2_hours_limit!(model::PSI2.InvestmentModel, portfolio::PSIP.
     return
 end
 
+# Reservoir energy limit for existing hydro. PSI2 dispatches base-system generators only within
+# 0..rated MW, so without this the CEM can run hydro at full output whatever the inflow. Each
+# representative week stands for its month: the reservoir level (MWh) is tracked month to month,
+# adding the month's inflow from the reservoir's "inflow" time series (per-unit on the system base,
+# as HydroEnergyModelReservoir reads it) and subtracting the week's turbine energy scaled to the
+# month and any spill. The level stays within the reservoir limits and is cyclic within each interval.
+function _apply_hydro_energy_limits!(model::PSI2.InvestmentModel, portfolio::PSIP.Portfolio)
+    container = model.internal.container
+    jm = container.JuMPmodel
+    sys = PSIP.get_base_system(portfolio)
+    tm = PSI2.get_time_mapping(container)
+    stamps = PSI2.get_time_stamps(tm)
+    slices = PSI2.get_consecutive_slices(tm)
+    weeks_by_interval = PSI2.get_investment_map_to_operational_slices(tm)
+    n_intervals = length(_PORTFOLIO_INTERVAL_DATA[objectid(portfolio)].intervals)
+    base_power = PSY.get_base_power(sys)
+
+    reservoirs = filter(PSY.get_available, collect(PSY.get_components(PSY.HydroReservoir, sys)))
+    turbines_of = Dict(PSY.get_name(r) => [PSY.get_name(t) for t in PSY.get_downstream_turbines(r)
+                                           if t isa PSY.HydroTurbine && PSY.get_available(t)] for r in reservoirs)
+    filter!(r -> !isempty(turbines_of[PSY.get_name(r)]), reservoirs)
+    if isempty(reservoirs)
+        @warn "No hydro reservoirs with turbines found; hydro energy limit not applied"
+        return
+    end
+
+    # Turbine dispatch variables by (turbine, time step)
+    turbine_names = Set(vcat(values(turbines_of)...))
+    dispatch = Dict{Tuple{String, Int}, JuMP.VariableRef}()
+    for v in JuMP.all_variables(jm)
+        vn = JuMP.name(v)
+        contains(vn, "ActivePowerVariable") || continue
+        m = match(r"_\{([^{}]+), (\d+)\}$", vn)
+        (isnothing(m) || !(m.captures[1] in turbine_names)) && continue
+        dispatch[(String(m.captures[1]), parse(Int, m.captures[2]))] = v
+    end
+
+    names_ = PSY.get_name.(reservoirs)
+    n_weeks = maximum(length(weeks_by_interval[i]) for i in 1:n_intervals)
+    level = JuMP.@variable(jm, hydro_level[names_, 1:n_intervals, 1:n_weeks] >= 0)
+    spill = JuMP.@variable(jm, hydro_spill[names_, 1:n_intervals, 1:n_weeks] >= 0)
+    turbined = Dict{Tuple{String, Int, Int}, JuMP.AffExpr}()  # month-equivalent turbine MWh
+    inflow_mwh = Dict{Tuple{String, Int, Int}, Float64}()
+    for r in reservoirs
+        name = PSY.get_name(r)
+        limits = PSY.with_units_base(() -> PSY.get_storage_level_limits(r), sys, PSY.UnitSystem.NATURAL_UNITS)
+        inflow = PSY.get_time_series_array(PSY.SingleTimeSeries, r, "inflow")
+        inflow_scale = PSY.get_inflow(r) * base_power
+        for i in 1:n_intervals
+            weeks = weeks_by_interval[i]
+            for (w, sx) in enumerate(weeks)
+                steps = slices[sx]
+                month_start = Dates.firstdayofmonth(stamps[first(steps)])
+                month_hours = Dates.daysinmonth(month_start) * 24
+                month = TimeSeries.to(TimeSeries.from(inflow, DateTime(month_start)),
+                                      DateTime(month_start) + Hour(month_hours - 1))
+                inflow_mwh[(name, i, w)] = sum(TimeSeries.values(month)) * inflow_scale
+                e = JuMP.AffExpr(0.0)
+                for t in steps, turbine in turbines_of[name]
+                    haskey(dispatch, (turbine, t)) && JuMP.add_to_expression!(e, month_hours / length(steps), dispatch[(turbine, t)])
+                end
+                turbined[(name, i, w)] = e
+                JuMP.set_lower_bound(level[name, i, w], limits.min)
+                JuMP.set_upper_bound(level[name, i, w], limits.max)
+                previous = w == 1 ? level[name, i, length(weeks)] : level[name, i, w - 1]
+                JuMP.@constraint(jm, level[name, i, w] == previous + inflow_mwh[(name, i, w)] - e - spill[name, i, w])
+            end
+            for w in (length(weeks) + 1):n_weeks  # intervals with fewer weeks (partial-year test runs)
+                JuMP.fix(level[name, i, w], 0.0; force = true)
+                JuMP.fix(spill[name, i, w], 0.0; force = true)
+            end
+        end
+        annual = [sum(get(inflow_mwh, (name, i, w), 0.0) for w in 1:n_weeks) for i in 1:n_intervals]
+        @info "Hydro energy limit: $name inflow $(join(round.(Int, annual), ", ")) MWh/yr by interval, storage $(limits.min)-$(limits.max) MWh, turbines $(join(turbines_of[name], ", "))"
+    end
+    jm.ext[:hydro_energy] = (turbined = turbined, inflow = inflow_mwh, level = level, spill = spill,
+                             reservoirs = names_, n_intervals = n_intervals, weeks_by_interval = weeks_by_interval)
+    return
+end
+
+# Annual hydro energy, inflow and spill (MWh) by reservoir and interval from the CEM solution
+function _hydro_energy_by_interval(res::PSI2.OptimizationProblemResults)
+    container = PSI2.get_optimization_container(res.model)
+    isnothing(container) && return nothing
+    jm = PSI2.get_jump_model(container)
+    haskey(jm.ext, :hydro_energy) || return nothing
+    h = jm.ext[:hydro_energy]
+    total(f, name, i) = sum(f(name, i, w) for w in eachindex(h.weeks_by_interval[i]); init = 0.0)
+    return Dict(name => (
+        generation_mwh = [total((n, i, w) -> JuMP.value(h.turbined[(n, i, w)]), name, i) for i in 1:h.n_intervals],
+        inflow_mwh = [total((n, i, w) -> h.inflow[(n, i, w)], name, i) for i in 1:h.n_intervals],
+        spill_mwh = [total((n, i, w) -> JuMP.value(h.spill[n, i, w]), name, i) for i in 1:h.n_intervals],
+    ) for name in h.reservoirs)
+end
+
 # Builds by technology and the year they come online (the start year of their investment interval):
 # tech => Dict(year => MW)
 function _investments_by_year(res::PSI2.OptimizationProblemResults, port::PSIP.Portfolio)
@@ -1461,6 +1561,7 @@ function _write_planning_summary(res::PSI2.OptimizationProblemResults, port::PSI
     jm = PSI2.get_jump_model(container)
     t2 = _tier2_fuel_by_interval(res)
     hours = _tier2_hours_by_interval(res)
+    hydro = _hydro_energy_by_interval(res)
     summary = Dict(
         "objective" => JuMP.objective_value(jm),
         "investments_mw" => _extract_investment_results(res),
@@ -1470,6 +1571,8 @@ function _write_planning_summary(res::PSI2.OptimizationProblemResults, port::PSI
         "tier2_slack_gallons_per_interval" => isnothing(t2) ? nothing : t2.slack,
         "tier2_hours_excess_mwh_per_interval" => isnothing(hours) ? nothing :
             [sum(hours.excess_mwh[(u, i)] for u in hours.units) for i in 1:hours.n_intervals],
+        "hydro_per_interval" => isnothing(hydro) ? nothing :
+            Dict(name => Dict(string(k) => v for (k, v) in pairs(h)) for (name, h) in hydro),
     )
     open(path, "w") do io
         JSON.print(io, summary, 2)
@@ -2200,6 +2303,14 @@ function report_planning_results(
                             gal = t2_now.gallons[i]
                             status = t2_now.slack[i] > 1e-6 ? "EXCEEDS by $(round(t2_now.slack[i], digits=0)) gal" : "within limit"
                             line *= " | Diesel fuel: $(round(gal, digits=0)) gal/yr ($status)"
+                        end
+                        hydro_now = _hydro_energy_by_interval(res)
+                        if !isnothing(hydro_now)
+                            for (name, h) in sort(collect(hydro_now))
+                                i <= length(h.generation_mwh) || continue
+                                line *= " | $name: $(round(h.generation_mwh[i] / 1000, digits=1)) of $(round(h.inflow_mwh[i] / 1000, digits=1)) GWh/yr inflow"
+                                h.spill_mwh[i] > 1.0 && (line *= " ($(round(h.spill_mwh[i] / 1000, digits=1)) spilled)")
+                            end
                         end
                         hours_now = _tier2_hours_by_interval(res)
                         if !isnothing(hours_now) && i <= hours_now.n_intervals
